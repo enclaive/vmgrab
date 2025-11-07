@@ -7,11 +7,19 @@ import (
 )
 
 var (
-	// Version information
-	Version   = "dev"
-	GitCommit = "unknown"
-	BuildDate = "unknown"
+	// Version information (set by main package)
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
 )
+
+// SetVersion sets version information from main package
+func SetVersion(v, c, b string) {
+	version = v
+	commit = c
+	buildTime = b
+	rootCmd.Version = fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, buildTime)
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "vmgrab",
@@ -40,7 +48,6 @@ var rootCmd = &cobra.Command{
 
 🔐 Powered by AMD SEV-SNP | Made with ❤️  by Enclaive
 `,
-	Version: fmt.Sprintf("%s (commit: %s, built: %s)", Version, GitCommit, BuildDate),
 }
 
 // Execute runs the root command

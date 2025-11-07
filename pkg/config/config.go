@@ -41,19 +41,19 @@ func DefaultConfig() *Config {
 	return &Config{
 		VMs: VMConfig{
 			Standard: VMInfo{
-				Name:        "neo4j-vm1",
+				Name:        "standard-vm",
 				Description: "Standard VM (no encryption)",
 			},
 			Confidential: VMInfo{
-				Name:        "neo4j-cvm",
-				Description: "Confidential VM (SEV-SNP)",
+				Name:        "confidential-vm",
+				Description: "Confidential VM (SEV-SNP/TDX)",
 			},
 		},
 		Search: SearchConfig{
 			{
 				Name:     "NHS Numbers",
 				Pattern:  `\d{3}-\d{2}-\d{4}`,
-				Examples: []string{"117-66-8129", "991-70-5333"},
+				Examples: []string{"123-45-6789"},
 			},
 			{
 				Name:    "Emails",

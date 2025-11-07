@@ -27,30 +27,36 @@ vmgrab helps security researchers and system administrators demonstrate the effe
 ### Installation
 
 ```bash
-# Build from source
-go build -o vmgrab
+# Build using Makefile (recommended - includes version info)
+make build
 
-# Or use the pre-compiled binary
-chmod +x vmgrab
+# The binary will be in bin/vmgrab
+./bin/vmgrab --version
+
+# Or install to /usr/local/bin
+make install
+
+# Or build manually
+go build -o bin/vmgrab
 ```
 
 ### Basic Usage
 
 ```bash
 # List all VMs with security status
-./vmgrab list
+./bin/vmgrab list
 
 # Dump VM memory
-sudo ./vmgrab dump <vm-name> /tmp/dump.bin
+sudo ./bin/vmgrab dump <vm-name> /tmp/dump.bin
 
 # Search memory dump for patterns
-./vmgrab search /tmp/dump.bin "117-66-8129"
+./bin/vmgrab search /tmp/dump.bin "123-45-6789"
 
 # Run complete attack on single VM
-sudo ./vmgrab attack <vm-name> --pattern "sensitive-data"
+sudo ./bin/vmgrab attack <vm-name> --pattern "sensitive-data"
 
 # Run full demo (standard VM vs confidential VM)
-sudo ./vmgrab demo
+sudo ./bin/vmgrab demo
 ```
 
 ### Configuration
@@ -58,7 +64,7 @@ sudo ./vmgrab demo
 Create a `.vmgrab.yaml` config file for custom settings:
 
 ```bash
-./vmgrab config init
+./bin/vmgrab config init
 ```
 
 See `.vmgrab.yaml.example` for configuration options.

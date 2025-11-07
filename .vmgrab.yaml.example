@@ -12,21 +12,20 @@
 vms:
   # Standard VM (no memory/disk encryption)
   standard:
-    name: neo4j-vm1
+    name: standard-vm
     description: Standard VM (no encryption)
 
   # Confidential VM (with SEV-SNP/TDX)
   confidential:
-    name: neo4j-cvm
-    description: Confidential VM (SEV-SNP)
+    name: confidential-vm
+    description: Confidential VM (SEV-SNP/TDX)
 
 # Search patterns for sensitive data
 search_patterns:
   - name: NHS Numbers
     pattern: \d{3}-\d{2}-\d{4}
     examples:
-      - 117-66-8129
-      - 991-70-5333
+      - 123-45-6789
 
   - name: Emails
     pattern: '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
