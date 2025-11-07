@@ -20,13 +20,11 @@ var dumpCmd = &cobra.Command{
 }
 
 var (
-	dumpRemote bool
-	dumpPath   string
+	dumpPath string
 )
 
 func init() {
 	rootCmd.AddCommand(dumpCmd)
-	dumpCmd.Flags().BoolVarP(&dumpRemote, "remote", "r", false, "Keep dump on remote host (don't download)")
 	dumpCmd.Flags().StringVarP(&dumpPath, "output", "o", "/tmp", "Output directory for dump file")
 }
 
@@ -41,30 +39,16 @@ func runDump(cmd *cobra.Command, args []string) error {
 		outputFile = filepath.Join(dumpPath, fmt.Sprintf("%s-%s.dump", vmName, timestamp))
 	}
 
-	host, _ := cmd.Flags().GetString("host")
-	user, _ := cmd.Flags().GetString("user")
-	keyPath, _ := cmd.Flags().GetString("key")
 	verbose, _ := cmd.Flags().GetBool("verbose")
-
-	v := virsh.New(host, user, keyPath, verbose)
+	v := virsh.NewLocal(verbose)
 
 	// Print header
 	cyan := color.New(color.FgCyan, color.Bold)
 	cyan.Printf("\n💾 Dumping VM Memory: %s\n", vmName)
 	fmt.Println(color.HiBlackString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
 
-	// Determine remote path
-	remotePath := outputFile
-	if !filepath.IsAbs(remotePath) {
-		remotePath = "/tmp/" + filepath.Base(outputFile)
-	}
-
 	fmt.Printf("📍 Target VM:      %s\n", color.CyanString(vmName))
-	fmt.Printf("🖥️  Remote host:    %s\n", color.HiBlackString(host))
-	fmt.Printf("📂 Remote path:    %s\n", color.HiBlackString(remotePath))
-	if !dumpRemote {
-		fmt.Printf("💾 Local path:     %s\n", color.HiBlackString(outputFile))
-	}
+	fmt.Printf("💾 Output path:    %s\n", color.HiBlackString(outputFile))
 	fmt.Println()
 
 	// Show progress bar
@@ -96,7 +80,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 
 	// Execute virsh dump
 	startTime := time.Now()
-	err := v.Dump(vmName, remotePath)
+	err := v.Dump(vmName, outputFile)
 	done <- true
 
 	if err != nil {
@@ -108,7 +92,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 	duration := time.Since(startTime)
 
 	// Get dump file info
-	info, err := v.GetFileInfo(remotePath)
+	size, err := v.GetFileSize(outputFile)
 	if err != nil {
 		color.Yellow("⚠️  Warning: Could not get dump file info: %v", err)
 	}
@@ -116,46 +100,10 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// Success message
 	color.Green("\n✅ Memory dump completed successfully!")
 	fmt.Printf("⏱️  Duration:      %s\n", color.HiBlackString(duration.Round(time.Second).String()))
-	if info != nil {
-		fmt.Printf("📊 Dump size:     %s\n", color.HiBlackString(formatBytes(info.Size)))
-		fmt.Printf("🔍 Location:      %s\n", color.HiBlackString(info.Path))
+	if size > 0 {
+		fmt.Printf("📊 Dump size:     %s\n", color.HiBlackString(formatBytes(size)))
 	}
-
-	// Download if not --remote
-	if !dumpRemote && info != nil {
-		fmt.Println()
-		color.Cyan("📥 Downloading dump from remote host...")
-
-		downloadBar := progressbar.NewOptions64(info.Size,
-			progressbar.OptionSetDescription("⏬ Downloading..."),
-			progressbar.OptionSetWidth(40),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetTheme(progressbar.Theme{
-				Saucer:        "█",
-				SaucerPadding: "░",
-				BarStart:      "[",
-				BarEnd:        "]",
-			}),
-		)
-
-		err = v.DownloadFile(remotePath, outputFile, downloadBar)
-		if err != nil {
-			return fmt.Errorf("failed to download dump: %w", err)
-		}
-
-		downloadBar.Finish()
-		color.Green("\n✅ Download completed!")
-		fmt.Printf("💾 Local file:    %s\n", color.HiBlackString(outputFile))
-
-		// Clean up remote file
-		fmt.Println()
-		color.HiBlack("🧹 Cleaning up remote dump file...")
-		if err := v.RemoveFile(remotePath); err != nil {
-			color.Yellow("⚠️  Warning: Could not remove remote file: %v", err)
-		} else {
-			color.HiBlack("✓ Remote file removed")
-		}
-	}
+	fmt.Printf("🔍 Location:      %s\n", color.HiBlackString(outputFile))
 
 	fmt.Println()
 	fmt.Println(color.HiBlackString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))

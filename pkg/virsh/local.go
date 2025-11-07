@@ -3,8 +3,17 @@ package virsh
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 )
+
+// VM represents a virtual machine
+type VM struct {
+	ID     string
+	Name   string
+	State  string
+	HasSEV bool
+}
 
 // LocalClient for running virsh commands directly on the host
 type LocalClient struct {
@@ -204,4 +213,41 @@ func parseDiskMatches(output string) []DiskMatch {
 	}
 
 	return matches
+}
+
+// parseVMList parses virsh list output
+func parseVMList(output string) []VM {
+	var vms []VM
+
+	// Match lines like: " 5    neo4j-cvm   running"
+	re := regexp.MustCompile(`^\s*(\d+|-)\s+(\S+)\s+(\S.*)$`)
+
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Id") || strings.HasPrefix(line, "--") || line == "" {
+			continue // Skip header and separator
+		}
+
+		matches := re.FindStringSubmatch(line)
+		if len(matches) >= 4 {
+			id := matches[1]
+			name := matches[2]
+			state := strings.TrimSpace(matches[3])
+
+			// Detect SEV-SNP VMs by name
+			hasSEV := strings.Contains(strings.ToLower(name), "cvm") ||
+				strings.Contains(strings.ToLower(name), "sev") ||
+				strings.Contains(strings.ToLower(name), "confidential")
+
+			vms = append(vms, VM{
+				ID:     id,
+				Name:   name,
+				State:  state,
+				HasSEV: hasSEV,
+			})
+		}
+	}
+
+	return vms
 }

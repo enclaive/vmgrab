@@ -81,19 +81,16 @@ func runDemo(cmd *cobra.Command, args []string) error {
 		patternName = "Sensitive Data"
 	}
 
-	host, _ := cmd.Flags().GetString("host")
-	user, _ := cmd.Flags().GetString("user")
-	keyPath, _ := cmd.Flags().GetString("key")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 
-	v := virsh.New(host, user, keyPath, verbose)
+	v := virsh.NewLocal(verbose)
 
 	// Print demo header
 	printDemoHeader()
 
 	// Step 0: List VMs
 	fmt.Println()
-	color.Cyan("📋 Step 0: Listing VMs on host %s", host)
+	color.Cyan("📋 Step 0: Listing VMs on local host")
 	fmt.Println(color.HiBlackString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
 
 	vms, err := v.List()
@@ -159,7 +156,7 @@ func runDemo(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func attackVM(v *virsh.Client, vmName, dumpPath, pattern, patternName string, isConfidential bool) error {
+func attackVM(v *virsh.LocalClient, vmName, dumpPath, pattern, patternName string, isConfidential bool) error {
 	// Step 1: Dump memory
 	fmt.Println()
 	color.Cyan("📍 Step 1: Dumping %s memory", vmName)
@@ -174,9 +171,9 @@ func attackVM(v *virsh.Client, vmName, dumpPath, pattern, patternName string, is
 		return fmt.Errorf("dump failed: %w", err)
 	}
 
-	info, _ := v.GetFileInfo(dumpPath)
-	if info != nil {
-		color.Green("✅ Dump completed: %s", formatBytes(info.Size))
+	size, _ := v.GetFileSize(dumpPath)
+	if size > 0 {
+		color.Green("✅ Dump completed: %s", formatBytes(size))
 	}
 
 	time.Sleep(1 * time.Second)

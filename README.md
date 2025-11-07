@@ -73,19 +73,6 @@ See `.vmgrab.yaml.example` for configuration options.
 - `disk-search` - Search VM disk files from host (proves LUKS encryption)
 - `config` - Manage configuration (init, show, validate)
 
-## Remote Mode
-
-vmgrab supports remote KVM hosts via SSH:
-
-```yaml
-# .vmgrab.yaml
-ssh:
-  enabled: true
-  host: "37.27.127.61"
-  user: "ion"
-  ssh_key: "/path/to/key"
-```
-
 ## Example Output
 
 ```

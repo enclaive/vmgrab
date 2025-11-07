@@ -1,17 +1,12 @@
-# KVM Memory Dump Tool Configuration
+# vmgrab Configuration
 #
-# This file configures the vmgrab CLI tool for your environment.
+# This file configures the vmgrab CLI tool for your local KVM environment.
 # Copy this to .vmgrab.yaml and customize for your setup.
 #
 # Configuration priority:
-#   1. CLI flags (--host, --standard-vm, etc.)
+#   1. CLI flags (--standard-vm, --confidential-vm, etc.)
 #   2. This config file
 #   3. Built-in defaults
-
-# KVM host configuration
-host: 37.27.127.61
-user: ion
-ssh_key: ../enclaivessh
 
 # Virtual machine definitions for demo
 vms:
@@ -39,27 +34,11 @@ search_patterns:
   - name: Person Names
     pattern: 'Person\(.*name:"[^"]+"'
 
-# Example customization for different environments:
-#
-# AWS:
-#   host: ec2-user@my-kvm-host.amazonaws.com
-#   vms:
-#     standard:
-#       name: i-standard-instance
-#     confidential:
-#       name: i-confidential-instance
-#
-# Azure:
-#   host: azureuser@my-vm-host.azure.com
-#   vms:
-#     standard:
-#       name: standard-vm
-#     confidential:
-#       name: confidential-vm-dcasv5
-#
-# Custom search patterns:
-#   search_patterns:
-#     - name: Credit Cards
-#       pattern: '\d{4}-\d{4}-\d{4}-\d{4}'
-#     - name: SSN
-#       pattern: '\d{3}-\d{2}-\d{4}'
+# Example custom search patterns:
+# search_patterns:
+#   - name: Credit Cards
+#     pattern: '\d{4}-\d{4}-\d{4}-\d{4}'
+#   - name: SSN
+#     pattern: '\d{3}-\d{2}-\d{4}'
+#   - name: API Keys
+#     pattern: 'sk-[a-zA-Z0-9]{32}'

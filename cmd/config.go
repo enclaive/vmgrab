@@ -161,7 +161,6 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 
 	// Show summary
 	color.Cyan("📋 Configuration summary:")
-	fmt.Printf("   Host:         %s\n", color.HiWhiteString("%s@%s", cfg.User, cfg.Host))
 	fmt.Printf("   Standard VM:  %s\n", color.HiWhiteString(cfg.VMs.Standard.Name))
 	fmt.Printf("   Confident VM: %s\n", color.HiWhiteString(cfg.VMs.Confidential.Name))
 	fmt.Printf("   Patterns:     %s\n", color.HiWhiteString("%d defined", len(cfg.Search)))

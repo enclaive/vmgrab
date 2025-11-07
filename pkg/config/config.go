@@ -10,10 +10,7 @@ import (
 
 // Config represents the CLI configuration
 type Config struct {
-	Host   string    `yaml:"host"`
-	User   string    `yaml:"user"`
-	SSHKey string    `yaml:"ssh_key"`
-	VMs    VMConfig  `yaml:"vms"`
+	VMs    VMConfig     `yaml:"vms"`
 	Search SearchConfig `yaml:"search_patterns"`
 }
 
@@ -42,9 +39,6 @@ type SearchPattern struct {
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Host:   "37.27.127.61",
-		User:   "ion",
-		SSHKey: "../enclaivessh",
 		VMs: VMConfig{
 			Standard: VMInfo{
 				Name:        "neo4j-vm1",
@@ -114,12 +108,6 @@ func (c *Config) Save(path string) error {
 
 // Validate validates the configuration
 func (c *Config) Validate() error {
-	if c.Host == "" {
-		return fmt.Errorf("host is required")
-	}
-	if c.User == "" {
-		return fmt.Errorf("user is required")
-	}
 	if c.VMs.Standard.Name == "" {
 		return fmt.Errorf("standard VM name is required")
 	}
