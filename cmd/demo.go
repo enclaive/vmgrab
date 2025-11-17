@@ -259,28 +259,62 @@ func printDemoHeader() {
 
 func printComparisonTable() {
 	fmt.Println()
+	// Box drawing characters
 	fmt.Println(color.HiWhiteString("┌─────────────────────────┬──────────────────┬──────────────────┐"))
 	fmt.Println(color.HiWhiteString("│ Security Feature        │ VM1 (Standard)   │ cVM (Protected)  │"))
 	fmt.Println(color.HiWhiteString("├─────────────────────────┼──────────────────┼──────────────────┤"))
-	fmt.Printf("│ %-23s │ %-16s │ %-16s │\n",
-		"TLS Encryption",
-		color.GreenString("✓ Yes"),
-		color.GreenString("✓ Yes"))
-	fmt.Printf("│ %-23s │ %-16s │ %-16s │\n",
-		"Memory Encryption",
-		color.RedString("✗ No"),
-		color.GreenString("✓ SEV-SNP"))
-	fmt.Printf("│ %-23s │ %-16s │ %-16s │\n",
-		"Disk Encryption",
-		color.RedString("✗ No"),
-		color.GreenString("✓ LUKS"))
+
+	// Helper function to pad colored text properly
+	padColored := func(text string, width int) string {
+		// Calculate visual length (excluding ANSI codes)
+		visualLen := len(stripAnsi(text))
+		padding := width - visualLen
+		if padding < 0 {
+			padding = 0
+		}
+		return text + string(make([]byte, padding))
+	}
+
+	// TLS row
+	fmt.Printf("│ TLS Encryption          │ %s │ %s │\n",
+		padColored(color.GreenString("✓ Yes"), 16),
+		padColored(color.GreenString("✓ Yes"), 16))
+
+	// Memory row
+	fmt.Printf("│ Memory Encryption       │ %s │ %s │\n",
+		padColored(color.RedString("✗ No"), 16),
+		padColored(color.GreenString("✓ SEV-SNP"), 16))
+
+	// Disk row
+	fmt.Printf("│ Disk Encryption         │ %s │ %s │\n",
+		padColored(color.RedString("✗ No"), 16),
+		padColored(color.GreenString("✓ LUKS"), 16))
+
 	fmt.Println(color.HiWhiteString("├─────────────────────────┼──────────────────┼──────────────────┤"))
-	fmt.Printf("│ %-23s │ %-16s │ %-16s │\n",
-		color.HiWhiteString("Attack Result"),
-		color.RedString("❌ VULNERABLE"),
-		color.GreenString("✅ PROTECTED"))
+
+	// Result row
+	fmt.Printf("│ Attack Result           │ %s │ %s │\n",
+		padColored(color.RedString("❌ VULNERABLE"), 16),
+		padColored(color.GreenString("✅ PROTECTED"), 16))
+
 	fmt.Println(color.HiWhiteString("└─────────────────────────┴──────────────────┴──────────────────┘"))
 	fmt.Println()
+}
+
+// stripAnsi removes ANSI color codes to calculate visual length
+func stripAnsi(s string) string {
+	result := ""
+	inEscape := false
+	for _, c := range s {
+		if c == '\033' {
+			inEscape = true
+		} else if inEscape && c == 'm' {
+			inEscape = false
+		} else if !inEscape {
+			result += string(c)
+		}
+	}
+	return result
 }
 
 func printDemoFooter() {

@@ -81,14 +81,18 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// Execute virsh dump
 	startTime := time.Now()
 	err := v.Dump(vmName, outputFile)
+
+	// Signal goroutine to stop and wait briefly for it to finish
 	done <- true
+	time.Sleep(150 * time.Millisecond) // Give goroutine time to exit cleanly
+
+	// Finish the progress bar
+	bar.Finish()
 
 	if err != nil {
-		bar.Close()
 		return fmt.Errorf("failed to dump VM memory: %w", err)
 	}
 
-	bar.Finish()
 	duration := time.Since(startTime)
 
 	// Get dump file info

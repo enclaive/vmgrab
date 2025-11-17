@@ -37,6 +37,12 @@ func New(filePath string, verbose bool) *Searcher {
 
 // Search finds all occurrences of pattern in the dump file
 func (s *Searcher) Search(pattern string, maxMatches int) ([]Match, error) {
+	// Validate regex pattern before compiling
+	_, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex pattern: %w", err)
+	}
+
 	file, err := os.Open(s.FilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
@@ -80,8 +86,9 @@ func (s *Searcher) Search(pattern string, maxMatches int) ([]Match, error) {
 			}
 		}
 
-		// Keep last 1KB as overlap for next chunk (in case match spans chunks)
-		overlapSize := 1024
+		// Keep last 8KB as overlap for next chunk (in case match spans chunks)
+		// Increased from 1KB to 8KB to prevent missing matches at chunk boundaries
+		overlapSize := 8192
 		if n < overlapSize {
 			overlapSize = n
 		}
@@ -246,6 +253,24 @@ func log2(x float64) float64 {
 func ContainsPattern(data []byte, pattern string) bool {
 	re := regexp.MustCompile(pattern)
 	return re.Match(data)
+}
+
+// CheckLinuxBanner searches for Linux kernel banner as a baseline encryption check
+// Returns true if Linux banner is found (memory is NOT encrypted)
+// Returns false if Linux banner is NOT found (memory is likely encrypted)
+func (s *Searcher) CheckLinuxBanner() (bool, error) {
+	// Linux kernel banner pattern - this is a static string in the kernel
+	// that should always be present in unencrypted memory dumps
+	// Reference: https://blogs.oracle.com/linux/live-kernel-debugging-2
+	pattern := `Linux version [0-9]+\.[0-9]+\.[0-9]+`
+
+	matches, err := s.Search(pattern, 1)
+	if err != nil {
+		return false, fmt.Errorf("baseline check failed: %w", err)
+	}
+
+	// If we found the Linux banner, memory is NOT encrypted
+	return len(matches) > 0, nil
 }
 
 // FormatHex formats bytes as hex dump
