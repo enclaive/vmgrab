@@ -64,18 +64,22 @@ Use Cases:
 
 ## Features
 
-- Dump KVM/libvirt VM memory via `virsh`
+- **Multi-backend memory dump support:**
+  - `procmem` — Universal `/proc/pid/mem` based dump (works on any hypervisor, including Kata Containers)
+  - `libvirt` — virsh-based dump for libvirt-managed VMs
+  - `qemu` — Direct QMP socket communication
 - Search memory dumps for sensitive data (NHS numbers, SSNs, emails, etc.)
 - Compare classical VMs vs confidential VMs (cVMs with memory encryption)
+- Automatic SEV-SNP/SEV/TDX detection from QEMU command line
 - Run automated attacks against the enclave
 
 
 ## Requirements
 
-- Linux host OS with KVM/libvirt
-- `virsh` command available
-- `sudo` privileges (for virsh dump and disk access)
+- Linux host OS with KVM/QEMU
+- `sudo` privileges (for `/proc/pid/mem` access)
 - Go 1.22+ (for building from source)
+- Optional: `virsh` for libvirt backend
 
 ## Installation
 
@@ -120,11 +124,16 @@ See `.vmgrab.yaml.example` for configuration options.
 # List all VMs with security status
 ./bin/vmgrab list
 
-# Dump VM memory
-sudo ./bin/vmgrab dump <vm-name> /tmp/dump.bin
+# Dump VM memory (auto-selects best backend: procmem)
+sudo ./bin/vmgrab dump <vm-name> -o /tmp
+
+# Force specific backend
+sudo ./bin/vmgrab dump <vm-name> -o /tmp --backend procmem
+sudo ./bin/vmgrab dump <vm-name> -o /tmp --backend libvirt
 
 # Search memory dump for patterns
-./bin/vmgrab search /tmp/dump.bin "123-45-6789"
+./bin/vmgrab search /tmp/<vm-name>-*.dump "password"
+./bin/vmgrab search /tmp/<vm-name>-*.dump "123-45-6789"
 
 # Run complete attack on single VM
 sudo ./bin/vmgrab attack <vm-name> --pattern "sensitive-data"
@@ -132,6 +141,19 @@ sudo ./bin/vmgrab attack <vm-name> --pattern "sensitive-data"
 # Run full demo (standard VM vs confidential VM)
 sudo ./bin/vmgrab demo
 ```
+
+## Backends
+
+| Backend | Method | Best For |
+|---------|--------|----------|
+| `procmem` (default) | `/proc/pid/mem` | Universal - works everywhere including Kata |
+| `libvirt` | `virsh dump --memory-only` | libvirt-managed VMs |
+| `qemu` | QMP `dump-guest-memory` | Direct QEMU access |
+
+The default backend is `procmem` as it works on any Linux system with QEMU processes, including:
+- Standard libvirt VMs
+- Kata Containers (where QMP socket is occupied by runtime)
+- Any direct QEMU process
 
 
 

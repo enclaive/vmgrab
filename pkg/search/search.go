@@ -103,7 +103,7 @@ func (s *Searcher) Search(pattern string, maxMatches int) ([]Match, error) {
 	return matches, nil
 }
 
-// GetContext retrieves n bytes before the given offset
+// GetContext retrieves n bytes before the given offset (legacy, for compatibility)
 func (s *Searcher) GetContext(offset int64, contextSize int) []byte {
 	file, err := os.Open(s.FilePath)
 	if err != nil {
@@ -133,7 +133,68 @@ func (s *Searcher) GetContext(offset int64, contextSize int) []byte {
 	return buffer[:n]
 }
 
-// GetRandomSnippets returns random memory snippets for visualization
+// MatchContext holds context before and after a match
+type MatchContext struct {
+	Before      []byte
+	Match       []byte
+	After       []byte
+	MatchOffset int64
+}
+
+// GetMatchContext retrieves bytes before and after the match
+func (s *Searcher) GetMatchContext(offset int64, matchLen int, contextBefore, contextAfter int) *MatchContext {
+	file, err := os.Open(s.FilePath)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	// Get file size
+	info, err := file.Stat()
+	if err != nil {
+		return nil
+	}
+	fileSize := info.Size()
+
+	// Calculate positions
+	beforeStart := offset - int64(contextBefore)
+	if beforeStart < 0 {
+		contextBefore = int(offset)
+		beforeStart = 0
+	}
+
+	afterEnd := offset + int64(matchLen) + int64(contextAfter)
+	if afterEnd > fileSize {
+		afterEnd = fileSize
+	}
+
+	// Read before context
+	_, err = file.Seek(beforeStart, io.SeekStart)
+	if err != nil {
+		return nil
+	}
+
+	beforeBuf := make([]byte, contextBefore)
+	nBefore, _ := file.Read(beforeBuf)
+
+	// Read match
+	matchBuf := make([]byte, matchLen)
+	nMatch, _ := file.Read(matchBuf)
+
+	// Read after context
+	afterBuf := make([]byte, contextAfter)
+	nAfter, _ := file.Read(afterBuf)
+
+	return &MatchContext{
+		Before:      beforeBuf[:nBefore],
+		Match:       matchBuf[:nMatch],
+		After:       afterBuf[:nAfter],
+		MatchOffset: offset,
+	}
+}
+
+// GetRandomSnippets returns random memory snippets from guest VM memory
+// Samples from middle 80% of dump to avoid QEMU structures at edges
 func (s *Searcher) GetRandomSnippets(count, size int) ([]Snippet, error) {
 	file, err := os.Open(s.FilePath)
 	if err != nil {
@@ -149,15 +210,21 @@ func (s *Searcher) GetRandomSnippets(count, size int) ([]Snippet, error) {
 	fileSize := info.Size()
 	var snippets []Snippet
 
-	for i := 0; i < count; i++ {
-		// Random offset
-		maxOffset := fileSize - int64(size)
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-		offset := rand.Int63n(maxOffset + 1)
+	// Sample from middle 80% of file (skip first/last 10% where QEMU structures live)
+	startRange := fileSize / 10         // 10% from start
+	endRange := fileSize - fileSize/10  // 10% from end
+	rangeSize := endRange - startRange
 
-		// Seek and read
+	if rangeSize < int64(size*count) {
+		// File too small, use whole file
+		startRange = 0
+		rangeSize = fileSize - int64(size)
+	}
+
+	for len(snippets) < count {
+		// Random offset within guest memory range
+		offset := startRange + rand.Int63n(rangeSize)
+
 		_, err := file.Seek(offset, io.SeekStart)
 		if err != nil {
 			continue
@@ -176,6 +243,36 @@ func (s *Searcher) GetRandomSnippets(count, size int) ([]Snippet, error) {
 	}
 
 	return snippets, nil
+}
+
+// isAllZeros checks if a byte slice contains only zeros
+func isAllZeros(data []byte) bool {
+	for _, b := range data {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// looksEncrypted checks if data looks like encrypted/random bytes
+// (not readable ASCII text, not all zeros)
+func looksEncrypted(data []byte) bool {
+	if len(data) == 0 || isAllZeros(data) {
+		return false
+	}
+
+	// Count printable ASCII characters
+	printableCount := 0
+	for _, b := range data {
+		if IsPrintable(b) {
+			printableCount++
+		}
+	}
+
+	// If more than 30% is printable ASCII, it's probably readable text (QEMU buffers)
+	printableRatio := float64(printableCount) / float64(len(data))
+	return printableRatio < 0.3
 }
 
 // IsPrintable checks if byte is printable ASCII

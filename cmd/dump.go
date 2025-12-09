@@ -2,20 +2,19 @@ package cmd
 
 import (
 	"fmt"
-	"path/filepath"
 	"time"
 
-	"github.com/enclaive/vmgrab/pkg/virsh"
+	"github.com/enclaive/vmgrab/pkg/backend"
 	"github.com/fatih/color"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 )
 
 var dumpCmd = &cobra.Command{
-	Use:   "dump <vm-name> [output-file]",
+	Use:   "dump <vm-name>",
 	Short: "Dump VM memory to file",
-	Long:  "Execute 'virsh dump' to create a memory dump of the specified VM",
-	Args:  cobra.RangeArgs(1, 2),
+	Long:  "Create a memory dump of the specified VM",
+	Args:  cobra.ExactArgs(1),
 	RunE:  runDump,
 }
 
@@ -30,25 +29,56 @@ func init() {
 
 func runDump(cmd *cobra.Command, args []string) error {
 	vmName := args[0]
-
-	var outputFile string
-	if len(args) > 1 {
-		outputFile = args[1]
-	} else {
-		timestamp := time.Now().Format("20060102-150405")
-		outputFile = filepath.Join(dumpPath, fmt.Sprintf("%s-%s.dump", vmName, timestamp))
-	}
-
 	verbose, _ := cmd.Flags().GetBool("verbose")
-	v := virsh.NewLocal(verbose)
+
+	// Use specific backend if specified, otherwise find VM across all backends
+	var b backend.Backend
+	var vm *backend.VM
+
+	if backendName != "" {
+		// Use explicitly specified backend
+		b = GetBackend(verbose)
+		if b == nil {
+			return fmt.Errorf("backend not available: %s", backendName)
+		}
+		// Find VM in this specific backend
+		vms, err := b.List()
+		if err != nil {
+			return fmt.Errorf("failed to list VMs: %w", err)
+		}
+		for i := range vms {
+			if vms[i].Name == vmName {
+				vm = &vms[i]
+				break
+			}
+		}
+		if vm == nil {
+			return fmt.Errorf("VM not found in %s backend: %s", backendName, vmName)
+		}
+	} else {
+		// Auto-detect: find VM across all backends
+		b, vm = backend.FindVM(vmName, verbose)
+		if b == nil || vm == nil {
+			return fmt.Errorf("VM not found: %s", vmName)
+		}
+	}
 
 	// Print header
 	cyan := color.New(color.FgCyan, color.Bold)
 	cyan.Printf("\n💾 Dumping VM Memory: %s\n", vmName)
 	fmt.Println(color.HiBlackString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
 
-	fmt.Printf("📍 Target VM:      %s\n", color.CyanString(vmName))
-	fmt.Printf("💾 Output path:    %s\n", color.HiBlackString(outputFile))
+	fmt.Printf("📍 Target VM:      %s (PID %d)\n", color.CyanString(vmName), vm.PID)
+	fmt.Printf("💾 Output dir:     %s\n", color.HiBlackString(dumpPath))
+
+	// Show SEV status
+	if vm.Security != "" {
+		fmt.Printf("🔒 Security:       %s\n", color.GreenString("%s Protected", vm.Security))
+	} else {
+		fmt.Printf("⚠️  Security:       %s\n", color.RedString("No encryption"))
+	}
+
+	fmt.Printf("🔧 Backend:        %s\n", color.HiBlackString(b.Name()))
 	fmt.Println()
 
 	// Show progress bar
@@ -78,15 +108,13 @@ func runDump(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// Execute virsh dump
+	// Execute dump
 	startTime := time.Now()
-	err := v.Dump(vmName, outputFile)
+	outputFile, err := b.Dump(vmName, dumpPath)
 
-	// Signal goroutine to stop and wait briefly for it to finish
+	// Signal goroutine to stop
 	done <- true
-	time.Sleep(150 * time.Millisecond) // Give goroutine time to exit cleanly
-
-	// Finish the progress bar
+	time.Sleep(150 * time.Millisecond)
 	bar.Finish()
 
 	if err != nil {
@@ -96,7 +124,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 	duration := time.Since(startTime)
 
 	// Get dump file info
-	size, err := v.GetFileSize(outputFile)
+	size, err := b.GetFileSize(outputFile)
 	if err != nil {
 		color.Yellow("⚠️  Warning: Could not get dump file info: %v", err)
 	}
