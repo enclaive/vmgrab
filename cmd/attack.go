@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/enclaive/vmgrab/pkg/config"
 	"github.com/enclaive/vmgrab/pkg/search"
@@ -142,32 +141,18 @@ func runAttack(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	if len(matches) == 0 {
-		// Check if encrypted based on multiple heuristics
-		isEncrypted := false
+		// Perform baseline check: search for Linux kernel banner
+		// This is a reliable way to determine if memory is encrypted
+		// Reference: https://blogs.oracle.com/linux/live-kernel-debugging-2
+		color.HiBlack("Performing baseline encryption check (Linux kernel banner)...")
+		fmt.Println()
 
-		// Heuristic 1: VM name contains cvm/sev/confidential
-		vmNameLower := strings.ToLower(vmName)
-		if strings.Contains(vmNameLower, "cvm") ||
-			strings.Contains(vmNameLower, "sev") ||
-			strings.Contains(vmNameLower, "confidential") {
-			isEncrypted = true
-		}
-
-		// Heuristic 2: Dump is significantly smaller (encrypted memory compresses better)
-		// Typical: standard VM ~32GB, cVM ~500MB-2GB
-		if dumpSize > 0 && dumpSize < 5*1024*1024*1024 { // < 5GB
-			isEncrypted = true
-		}
-
-		// Heuristic 3: Check entropy of sample data
-		if !isEncrypted && dumpSize > 0 {
-			snippets, _ := searcher.GetRandomSnippets(1, 1024)
-			if len(snippets) > 0 {
-				isEncrypted = search.IsLikelyEncrypted(snippets[0].Data)
-			}
-		}
-
-		if isEncrypted {
+		bannerFound, err := searcher.CheckLinuxBanner()
+		if err != nil {
+			color.Yellow("⚠️  Baseline check failed: %v", err)
+			color.HiBlack("Unable to determine encryption status reliably.")
+		} else if !bannerFound {
+			// Linux banner NOT found = memory IS encrypted
 			color.Green("✅ NO MATCHES FOUND - Memory appears ENCRYPTED!")
 			fmt.Println()
 			color.HiBlack("This is expected for confidential VMs with AMD SEV-SNP or Intel TDX.")
@@ -196,13 +181,18 @@ func runAttack(cmd *cobra.Command, args []string) error {
 			fmt.Println()
 			color.Green("🔒 CONCLUSION: Memory is PROTECTED by encryption")
 		} else {
-			color.Yellow("⚠️  No matches found")
+			// Linux banner found but user pattern not found
+			color.Yellow("⚠️  No matches found for pattern, but memory is NOT encrypted")
 			fmt.Println()
-			color.HiBlack("The pattern was not found in the memory dump.")
+			color.HiBlack("Linux kernel banner was found (baseline check passed).")
+			color.HiBlack("This means memory is NOT encrypted, but your pattern didn't match.")
+			fmt.Println()
 			color.HiBlack("This could mean:")
-			color.HiBlack("  • The data is not in memory at this time")
-			color.HiBlack("  • The pattern doesn't match the data format")
-			color.HiBlack("  • Try different search patterns")
+			color.HiBlack("  • The specific data is not in memory at this time")
+			color.HiBlack("  • The pattern doesn't match the actual data format")
+			color.HiBlack("  • Try different search patterns or verify the data exists in the VM")
+			fmt.Println()
+			color.Yellow("⚠️  CONCLUSION: Memory is VULNERABLE (not encrypted)")
 		}
 	} else {
 		color.Red("❌ VULNERABLE - %d match(es) found in memory!", len(matches))
