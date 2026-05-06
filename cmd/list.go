@@ -29,31 +29,72 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list VMs: %w", err)
 	}
 
+	podsHidden := backend.PodBackendBlockedByPerms()
+	if podsHidden {
+		color.New(color.FgYellow).Println(
+			"\n⚠️  crictl detected but not accessible — Kubernetes pods are hidden.\n" +
+				"   Re-run with sudo to list pod targets (runc + Kata).")
+	}
+
 	if len(vms) == 0 {
-		fmt.Println("\nNo VMs found")
+		if podsHidden {
+			fmt.Println("\nNo targets found (pods hidden — see warning above).")
+		} else {
+			fmt.Println("\nNo targets found")
+		}
 		return nil
+	}
+
+	// Detect whether any target carries pod metadata; if so, render a KIND
+	// column and prefix names with their namespace.
+	hasPods := false
+	for _, vm := range vms {
+		if vm.Kind != "" {
+			hasPods = true
+			break
+		}
+	}
+
+	displayName := func(vm backend.VM) string {
+		if vm.Namespace != "" {
+			return vm.Namespace + "/" + vm.Name
+		}
+		return vm.Name
 	}
 
 	// Calculate max name width
 	nameWidth := 4 // minimum "NAME"
 	for _, vm := range vms {
-		if len(vm.Name) > nameWidth {
-			nameWidth = len(vm.Name)
+		if n := len(displayName(vm)); n > nameWidth {
+			nameWidth = n
 		}
 	}
 	// Add padding
 	nameWidth += 2
 
+	kindWidth := 0
+	if hasPods {
+		kindWidth = 10 // "pod-kata" + padding
+	}
+
 	// Calculate total width for separator
-	totalWidth := 8 + nameWidth + 12 + 18 // PID + NAME + STATE + SECURITY
+	totalWidth := 8 + nameWidth + 12 + kindWidth + 18
 
 	// Print header
 	cyan := color.New(color.FgCyan, color.Bold)
-	cyan.Printf("\n🖥️  Virtual Machines\n")
+	if hasPods {
+		cyan.Printf("\n🖥️  Targets\n")
+	} else {
+		cyan.Printf("\n🖥️  Virtual Machines\n")
+	}
 	fmt.Println(color.HiBlackString(repeatStr("━", totalWidth)))
 
 	// Print table header
-	fmt.Printf("%-8s %-*s %-12s %s\n", "PID", nameWidth, "NAME", "STATE", "SECURITY")
+	if hasPods {
+		fmt.Printf("%-8s %-*s %-12s %-*s %s\n", "PID", nameWidth, "NAME", "STATE", kindWidth, "KIND", "SECURITY")
+	} else {
+		fmt.Printf("%-8s %-*s %-12s %s\n", "PID", nameWidth, "NAME", "STATE", "SECURITY")
+	}
 	fmt.Println(color.HiBlackString(repeatStr("━", totalWidth)))
 
 	// Print VMs
@@ -62,7 +103,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		pid := fmt.Sprintf("%-8s", strconv.Itoa(vm.PID))
 
 		// Format name with dynamic width
-		namePadded := fmt.Sprintf("%-*s", nameWidth, vm.Name)
+		namePadded := fmt.Sprintf("%-*s", nameWidth, displayName(vm))
 
 		// Format state
 		var stateStr string
@@ -80,16 +121,34 @@ func runList(cmd *cobra.Command, args []string) error {
 			securityLabel = color.RedString("⚠️  Unprotected")
 		}
 
-		fmt.Printf("%s %s %s %s\n",
-			pid,
-			color.CyanString(namePadded),
-			stateStr,
-			securityLabel,
-		)
+		if hasPods {
+			kind := vm.Kind
+			if kind == "" {
+				kind = "vm"
+			}
+			fmt.Printf("%s %s %s %-*s %s\n",
+				pid,
+				color.CyanString(namePadded),
+				stateStr,
+				kindWidth, kind,
+				securityLabel,
+			)
+		} else {
+			fmt.Printf("%s %s %s %s\n",
+				pid,
+				color.CyanString(namePadded),
+				stateStr,
+				securityLabel,
+			)
+		}
 	}
 
 	fmt.Println(color.HiBlackString(repeatStr("━", totalWidth)))
-	fmt.Printf("\n%s\n\n", color.HiBlackString(fmt.Sprintf("Total: %d VMs", len(vms))))
+	totalLabel := "VMs"
+	if hasPods {
+		totalLabel = "targets"
+	}
+	fmt.Printf("\n%s\n\n", color.HiBlackString(fmt.Sprintf("Total: %d %s", len(vms), totalLabel)))
 
 	return nil
 }

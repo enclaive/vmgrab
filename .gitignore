@@ -30,6 +30,14 @@ vendor/
 # Config files (keep example only)
 .vmgrab.yaml
 
+# Test secrets — never commit kubeconfigs or SSH keys
+tests/secrets/
+*.kubeconfig
+kubeconfig
+*_rsa
+*_ed25519
+enclaivessh
+
 # IDE
 .vscode/
 .idea/

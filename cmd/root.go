@@ -6,6 +6,7 @@ import (
 	"github.com/enclaive/vmgrab/pkg/backend"
 	// Import backends to register them
 	_ "github.com/enclaive/vmgrab/pkg/backend/libvirt"
+	_ "github.com/enclaive/vmgrab/pkg/backend/pod"
 	_ "github.com/enclaive/vmgrab/pkg/backend/procmem"
 	_ "github.com/enclaive/vmgrab/pkg/backend/qemu"
 	"github.com/spf13/cobra"
@@ -66,7 +67,7 @@ func Execute() error {
 func init() {
 	// Note: CLI runs directly on KVM host, no SSH needed
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "Verbose output")
-	rootCmd.PersistentFlags().StringVar(&backendName, "backend", "", "Backend to use (libvirt, qemu, procmem). Auto-detect if not specified.")
+	rootCmd.PersistentFlags().StringVar(&backendName, "backend", "", "Backend to use (libvirt, qemu, procmem, pod). Auto-detect if not specified.")
 }
 
 // GetBackend returns the selected backend

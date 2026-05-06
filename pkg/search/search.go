@@ -2,6 +2,7 @@ package search
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"math/rand"
@@ -350,6 +351,79 @@ func log2(x float64) float64 {
 func ContainsPattern(data []byte, pattern string) bool {
 	re := regexp.MustCompile(pattern)
 	return re.Match(data)
+}
+
+// FingerprintResult is the outcome of searching for a single fingerprint pattern.
+type FingerprintResult struct {
+	Pattern string
+	Found   bool
+	Offset  int64
+}
+
+// SearchPatterns runs Search(pattern, 1) for each pattern and returns one
+// FingerprintResult per input pattern, in the same order. Patterns are
+// regex (same syntax as Search). Used by the demo path to probe for
+// guest-kernel strings that must live only in encrypted private memory.
+func (s *Searcher) SearchPatterns(patterns []string) ([]FingerprintResult, error) {
+	results := make([]FingerprintResult, len(patterns))
+	for i, p := range patterns {
+		results[i].Pattern = p
+		matches, err := s.Search(p, 1)
+		if err != nil {
+			return nil, fmt.Errorf("pattern %q: %w", p, err)
+		}
+		if len(matches) > 0 {
+			results[i].Found = true
+			results[i].Offset = matches[0].Offset
+		}
+	}
+	return results, nil
+}
+
+// vsockHeaderSize is the size of struct virtio_vsock_hdr (LE):
+//
+//	src_cid u64, dst_cid u64, src_port u32, dst_port u32,
+//	len u32, type u16, op u16, flags u32, buf_alloc u32, fwd_cnt u32
+const vsockHeaderSize = 44
+
+// LooksLikeVsockSharedBuffer applies a heuristic to decide whether the bytes
+// immediately preceding matchOffset look like a virtio-vsock packet header —
+// i.e., the match landed inside the kata-agent stdout/vsock shared ring
+// buffer rather than in private guest RAM. Returns (true, hexPrefix) when
+// the heuristic fires, where hexPrefix is the hex dump of the first 16 bytes
+// of the candidate header (for narrative output).
+//
+// Heuristic (mild on purpose — false positives in the demo are far worse
+// than false negatives because they would falsely flag SEV-SNP as broken):
+//   - both src_cid and dst_cid are small (<= 16) — vsock CIDs in practice are
+//     2 (host), 3+ (guests); kata's CID is well below 16
+//   - type == 1 (VIRTIO_VSOCK_TYPE_STREAM)
+//   - 0 < len < 1 MiB
+func (s *Searcher) LooksLikeVsockSharedBuffer(matchOffset int64) (bool, string) {
+	if matchOffset < int64(vsockHeaderSize) {
+		return false, ""
+	}
+	ctx := s.GetMatchContext(matchOffset, 0, vsockHeaderSize, 0)
+	if ctx == nil || len(ctx.Before) < vsockHeaderSize {
+		return false, ""
+	}
+	h := ctx.Before
+	srcCID := binary.LittleEndian.Uint64(h[0:8])
+	dstCID := binary.LittleEndian.Uint64(h[8:16])
+	msgLen := binary.LittleEndian.Uint32(h[24:28])
+	msgType := binary.LittleEndian.Uint16(h[28:30])
+
+	if srcCID > 16 || dstCID > 16 {
+		return false, ""
+	}
+	if msgType != 1 {
+		return false, ""
+	}
+	if msgLen == 0 || msgLen >= 1<<20 {
+		return false, ""
+	}
+
+	return true, FormatHex(h[:16], 16)
 }
 
 // CheckLinuxBanner searches for Linux kernel banner as a baseline encryption check
