@@ -1,12 +1,21 @@
 package backend
 
-// VM represents a virtual machine
+import (
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// VM represents a virtual machine or pod target.
+// The zero values for Kind and Namespace preserve legacy VM behavior.
 type VM struct {
-	Name     string // VM name
-	PID      int    // QEMU process PID
-	State    string // running, paused, etc.
-	Security string // SEV-SNP, SEV, TDX, or empty for unprotected
-	Backend  string // which backend found this VM (libvirt, qemu, etc.)
+	Name      string // VM name, or pod name (for Kind != "")
+	PID       int    // host process PID (QEMU for VMs / Kata sandboxes, main container process for runc pods)
+	State     string // running, paused, etc.
+	Security  string // SEV-SNP, SEV, TDX, or empty for unprotected
+	Backend   string // which backend found this target (libvirt, qemu, procmem, pod)
+	Kind      string // "" for legacy VM, "pod-runc" or "pod-kata" for pods
+	Namespace string // k8s namespace for pods, empty otherwise
 }
 
 // Backend is the interface for VM management backends
@@ -70,14 +79,21 @@ func AutoSelect(verbose bool) Backend {
 	return nil
 }
 
-// ListAll returns VMs from all available backends, deduplicated by PID
-// Priority: procmem (universal), then libvirt (richer info for non-running VMs)
+// ListAll returns VMs from all available backends, merged by PID.
+//
+// Order matters: `pod` runs first because it carries the richest metadata
+// (namespace, pod name, Kind=pod-runc / pod-kata). procmem comes next and
+// only adds PIDs the pod backend didn't claim — typically non-k8s QEMU VMs.
+// libvirt and qemu backends add legacy VMs not visible via /proc.
+//
+// Without sudo `crictl info` fails and the pod backend self-disables; in
+// that case pod targets simply aren't returned. Callers that want to surface
+// that to the user should also call PodBackendBlockedByPerms().
 func ListAll(verbose bool) ([]VM, error) {
 	seen := make(map[int]bool)
 	var allVMs []VM
 
-	// procmem is primary - detects all QEMU processes including Kata
-	backendOrder := []string{"procmem", "libvirt", "qemu"}
+	backendOrder := []string{"pod", "procmem", "libvirt", "qemu"}
 
 	for _, name := range backendOrder {
 		b := Get(name, verbose)
@@ -105,11 +121,31 @@ func ListAll(verbose bool) ([]VM, error) {
 	return allVMs, nil
 }
 
-// FindVM finds a VM by name across all backends
-// Returns the backend that can manage it and the VM info
-// Priority: procmem first (universal dump method)
+// PodBackendBlockedByPerms reports whether the pod backend probe ran but
+// failed in a way consistent with insufficient privileges (crictl present
+// on PATH, but `crictl info` exits non-zero AND we're not root). Callers
+// can use this to print an actionable warning ("run under sudo") instead
+// of silently omitting Kubernetes pods from the list.
+func PodBackendBlockedByPerms() bool {
+	if _, err := exec.LookPath("crictl"); err != nil {
+		return false
+	}
+	if err := exec.Command("crictl", "info").Run(); err == nil {
+		return false
+	}
+	return os.Geteuid() != 0
+}
+
+// FindVM finds a VM or pod by name across all backends.
+// Returns the backend that can manage it and the VM info.
+// Order matches ListAll: pod first so a "namespace/pod" target hits the
+// backend that knows how to dump it (and produces pod-aware metadata) even
+// when procmem also sees the underlying QEMU/runc PID.
+// If name contains "/", it is treated as "namespace/pod" and matched against
+// pod targets (vm.Namespace+"/"+vm.Name); otherwise it matches vm.Name.
 func FindVM(name string, verbose bool) (Backend, *VM) {
-	backendOrder := []string{"procmem", "libvirt", "qemu"}
+	backendOrder := []string{"pod", "procmem", "libvirt", "qemu"}
+	nsName := strings.Contains(name, "/")
 
 	for _, bName := range backendOrder {
 		b := Get(bName, verbose)
@@ -123,7 +159,14 @@ func FindVM(name string, verbose bool) (Backend, *VM) {
 		}
 
 		for i := range vms {
-			if vms[i].Name == name {
+			var match bool
+			if nsName {
+				match = vms[i].Namespace != "" &&
+					vms[i].Namespace+"/"+vms[i].Name == name
+			} else {
+				match = vms[i].Name == name
+			}
+			if match {
 				vms[i].Backend = bName
 				return b, &vms[i]
 			}

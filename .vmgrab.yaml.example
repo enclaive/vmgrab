@@ -20,6 +20,18 @@ vms:
     name: confidential-vm
     description: Confidential VM (SEV-SNP/TDX)
 
+# Pod targets for `vmgrab demo --target=pod` on an OpenShift worker node.
+# Optional — only required when running the pod variant of the demo.
+# pods:
+#   standard:
+#     namespace: vmgrab-demo
+#     name: secret-runc
+#     description: Standard pod (runc, no memory encryption)
+#   confidential:
+#     namespace: vmgrab-demo
+#     name: secret-kata
+#     description: Kata-SNP sandboxed pod (SEV-SNP)
+
 # Search patterns for sensitive data
 search_patterns:
   - name: NHS Numbers

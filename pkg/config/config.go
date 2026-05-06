@@ -11,6 +11,7 @@ import (
 // Config represents the CLI configuration
 type Config struct {
 	VMs    VMConfig     `yaml:"vms"`
+	Pods   PodConfig    `yaml:"pods,omitempty"`
 	Search SearchConfig `yaml:"search_patterns"`
 }
 
@@ -24,6 +25,26 @@ type VMConfig struct {
 type VMInfo struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
+}
+
+// PodConfig defines pod targets for the demo command on OpenShift.
+// Entirely optional; the demo command falls back to the VM flow when Pods
+// is absent or empty.
+type PodConfig struct {
+	Standard     PodInfo `yaml:"standard"`
+	Confidential PodInfo `yaml:"confidential"`
+}
+
+// PodInfo names a single pod.
+type PodInfo struct {
+	Namespace   string `yaml:"namespace"`
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+}
+
+// Ref returns the "namespace/name" form used by the pod backend.
+func (p PodInfo) Ref() string {
+	return p.Namespace + "/" + p.Name
 }
 
 // SearchConfig defines search patterns

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/enclaive/vmgrab/pkg/backend"
@@ -11,11 +12,14 @@ import (
 )
 
 var dumpCmd = &cobra.Command{
-	Use:   "dump <vm-name>",
-	Short: "Dump VM memory to file",
-	Long:  "Create a memory dump of the specified VM",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runDump,
+	Use:   "dump <target>",
+	Short: "Dump VM or pod memory to file",
+	Long: `Create a memory dump of the specified target.
+
+Target can be a VM name, a pod name, or "namespace/pod" for pods. Use
+--backend=pod on an OpenShift worker node to dump container memory.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runDump,
 }
 
 var (
@@ -41,34 +45,48 @@ func runDump(cmd *cobra.Command, args []string) error {
 		if b == nil {
 			return fmt.Errorf("backend not available: %s", backendName)
 		}
-		// Find VM in this specific backend
+		// Find VM or pod in this specific backend. Accept either bare
+		// name or "namespace/name" form for pod targets.
 		vms, err := b.List()
 		if err != nil {
-			return fmt.Errorf("failed to list VMs: %w", err)
+			return fmt.Errorf("failed to list targets: %w", err)
 		}
+		nsName := strings.Contains(vmName, "/")
 		for i := range vms {
-			if vms[i].Name == vmName {
+			match := vms[i].Name == vmName
+			if nsName {
+				match = vms[i].Namespace != "" &&
+					vms[i].Namespace+"/"+vms[i].Name == vmName
+			}
+			if match {
 				vm = &vms[i]
 				break
 			}
 		}
 		if vm == nil {
-			return fmt.Errorf("VM not found in %s backend: %s", backendName, vmName)
+			return fmt.Errorf("target not found in %s backend: %s", backendName, vmName)
 		}
 	} else {
-		// Auto-detect: find VM across all backends
+		// Auto-detect: find target across all backends
 		b, vm = backend.FindVM(vmName, verbose)
 		if b == nil || vm == nil {
-			return fmt.Errorf("VM not found: %s", vmName)
+			return fmt.Errorf("target not found: %s", vmName)
 		}
 	}
 
 	// Print header
 	cyan := color.New(color.FgCyan, color.Bold)
-	cyan.Printf("\n💾 Dumping VM Memory: %s\n", vmName)
+	headerLabel := "VM"
+	if vm.Kind != "" {
+		headerLabel = "Pod"
+	}
+	cyan.Printf("\n💾 Dumping %s Memory: %s\n", headerLabel, vmName)
 	fmt.Println(color.HiBlackString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
 
-	fmt.Printf("📍 Target VM:      %s (PID %d)\n", color.CyanString(vmName), vm.PID)
+	fmt.Printf("📍 Target %-8s %s (PID %d)\n", headerLabel+":", color.CyanString(vmName), vm.PID)
+	if vm.Kind != "" {
+		fmt.Printf("🏷️  Kind:           %s\n", color.HiBlackString(vm.Kind))
+	}
 	fmt.Printf("💾 Output dir:     %s\n", color.HiBlackString(dumpPath))
 
 	// Show SEV status

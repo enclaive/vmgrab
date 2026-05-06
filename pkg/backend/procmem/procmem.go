@@ -76,6 +76,12 @@ func (b *Backend) List() ([]backend.VM, error) {
 	return b.parseProcessList(string(output))
 }
 
+// qemuBinaryRe matches any common QEMU binary name. Covers Debian/Ubuntu's
+// qemu-system-x86_64 family AND RHEL/RHCOS/Fedora's qemu-kvm (which is where
+// OpenShift Sandboxed Containers lives). Without the qemu-kvm alternative,
+// procmem silently misses every Kata sandbox and every libvirt VM on RHEL.
+var qemuBinaryRe = regexp.MustCompile(`qemu-(?:system|kvm)`)
+
 // parseProcessList extracts QEMU VMs from ps aux output
 func (b *Backend) parseProcessList(output string) ([]backend.VM, error) {
 	var vms []backend.VM
@@ -86,7 +92,7 @@ func (b *Backend) parseProcessList(output string) ([]backend.VM, error) {
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		// Skip non-QEMU processes
-		if !strings.Contains(line, "qemu-system") {
+		if !qemuBinaryRe.MatchString(line) {
 			continue
 		}
 
@@ -114,7 +120,7 @@ func (b *Backend) parseProcessList(output string) ([]backend.VM, error) {
 		}
 
 		// Detect security from cmdline
-		security := b.detectSecurity(pid)
+		security := b.DetectSecurity(pid)
 
 		vms = append(vms, backend.VM{
 			Name:     name,
@@ -127,9 +133,10 @@ func (b *Backend) parseProcessList(output string) ([]backend.VM, error) {
 	return vms, nil
 }
 
-// detectSecurity checks if a VM has SEV/TDX enabled from cmdline
-func (b *Backend) detectSecurity(pid int) string {
-	cmdline, err := b.getCmdLine(pid)
+// DetectSecurity checks if a process has SEV/TDX enabled from cmdline.
+// Exported so other backends (e.g. pod) can classify Kata QEMU sandboxes.
+func (b *Backend) DetectSecurity(pid int) string {
+	cmdline, err := b.GetCmdLine(pid)
 	if err != nil {
 		return ""
 	}
@@ -152,8 +159,8 @@ func (b *Backend) detectSecurity(pid int) string {
 	return ""
 }
 
-// getCmdLine reads the full command line from /proc/PID/cmdline
-func (b *Backend) getCmdLine(pid int) (string, error) {
+// GetCmdLine reads the full command line from /proc/PID/cmdline.
+func (b *Backend) GetCmdLine(pid int) (string, error) {
 	path := fmt.Sprintf("/proc/%d/cmdline", pid)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -188,7 +195,7 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 	}
 
 	// Find guest RAM region in /proc/pid/maps
-	regions, err := b.parseMemoryMaps(vm.PID)
+	regions, err := b.ParseMemoryMaps(vm.PID)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse memory maps: %w", err)
 	}
@@ -225,7 +232,7 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 	outputPath := filepath.Join(outputDir, fmt.Sprintf("%s-%s.dump", vmName, timestamp))
 
 	// Dump memory via /proc/pid/mem
-	err = b.dumpMemoryRegion(vm.PID, guestRAM, outputPath)
+	err = b.DumpMemoryRegion(vm.PID, guestRAM, outputPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to dump memory: %w", err)
 	}
@@ -233,8 +240,9 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 	return outputPath, nil
 }
 
-// parseMemoryMaps parses /proc/pid/maps to find memory regions
-func (b *Backend) parseMemoryMaps(pid int) ([]MemoryRegion, error) {
+// ParseMemoryMaps parses /proc/pid/maps to find memory regions.
+// Exported for reuse by other backends (e.g. pod) that dump by PID.
+func (b *Backend) ParseMemoryMaps(pid int) ([]MemoryRegion, error) {
 	mapsPath := fmt.Sprintf("/proc/%d/maps", pid)
 
 	// Try direct read first, fall back to sudo
@@ -302,8 +310,9 @@ func (b *Backend) parseMemoryMaps(pid int) ([]MemoryRegion, error) {
 	return regions, nil
 }
 
-// dumpMemoryRegion reads memory from /proc/pid/mem and writes to file
-func (b *Backend) dumpMemoryRegion(pid int, region *MemoryRegion, outputPath string) error {
+// DumpMemoryRegion reads memory from /proc/pid/mem and writes to file.
+// Exported for reuse by other backends (e.g. pod) that dump by PID.
+func (b *Backend) DumpMemoryRegion(pid int, region *MemoryRegion, outputPath string) error {
 	memPath := fmt.Sprintf("/proc/%d/mem", pid)
 
 	// Open output file
@@ -410,7 +419,7 @@ func (b *Backend) DumpLive(vmName string, handler func(data []byte, offset uint6
 	}
 
 	// Find guest RAM region
-	regions, err := b.parseMemoryMaps(vm.PID)
+	regions, err := b.ParseMemoryMaps(vm.PID)
 	if err != nil {
 		return err
 	}
