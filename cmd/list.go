@@ -29,14 +29,19 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list VMs: %w", err)
 	}
 
-	if backend.PodBackendBlockedByPerms() {
+	podsHidden := backend.PodBackendBlockedByPerms()
+	if podsHidden {
 		color.New(color.FgYellow).Println(
 			"\n⚠️  crictl detected but not accessible — Kubernetes pods are hidden.\n" +
 				"   Re-run with sudo to list pod targets (runc + Kata).")
 	}
 
 	if len(vms) == 0 {
-		fmt.Println("\nNo VMs found")
+		if podsHidden {
+			fmt.Println("\nNo targets found (pods hidden — see warning above).")
+		} else {
+			fmt.Println("\nNo targets found")
+		}
 		return nil
 	}
 

@@ -32,11 +32,14 @@ var demoCmd = &cobra.Command{
 	Use:   "demo",
 	Short: "Run complete attack demonstration",
 	Long: `Automatically run the full confidential computing demo:
-1. Dump standard VM memory
-2. Search for sensitive data in standard VM dump
-3. Dump confidential VM memory
-4. Search for same data in confidential VM dump
+1. Dump standard target memory (runc pod or unprotected VM)
+2. Search for sensitive data in the standard dump
+3. Dump confidential target memory (Kata-SNP pod or SEV-SNP VM)
+4. Search for the same data in the confidential dump
 5. Show comparison table proving encryption works
+
+Target type is selected via --target=vm (default) or --target=pod;
+passing --standard-pod / --confidential-pod implies --target=pod.
 
 The demo can be customized via config file (.vmgrab.yaml)
 or command-line flags.`,
@@ -108,10 +111,10 @@ func runDemo(cmd *cobra.Command, args []string) error {
 
 	verbose, _ := cmd.Flags().GetBool("verbose")
 
-	// Print demo header
-	printDemoHeader()
+	target := resolveDemoTarget(cfg)
+	printDemoHeader(target)
 
-	if resolveDemoTarget(cfg) == "pod" {
+	if target == "pod" {
 		return runDemoPod(cfg, pattern, patternName, verbose)
 	}
 	return runDemoVM(cfg, pattern, patternName, verbose)
@@ -499,7 +502,7 @@ func printPodComparisonTable() {
 		if padding < 0 {
 			padding = 0
 		}
-		return text + string(make([]byte, padding))
+		return text + strings.Repeat(" ", padding)
 	}
 
 	fmt.Printf("│ Memory isolation        │ %s │ %s │\n",
@@ -522,7 +525,7 @@ func printPodComparisonTable() {
 	fmt.Println()
 }
 
-func printDemoHeader() {
+func printDemoHeader(target string) {
 	cyan := color.New(color.FgCyan, color.Bold)
 
 	fmt.Println()
@@ -536,13 +539,20 @@ func printDemoHeader() {
 	fmt.Println()
 
 	fmt.Println(color.HiBlackString("This demonstration will:"))
-	fmt.Println(color.HiBlackString("  1. Attack a STANDARD VM (no encryption) → Data exposed ❌"))
-	fmt.Println(color.HiBlackString("  2. Attack a CONFIDENTIAL VM (SEV-SNP) → Data protected ✅"))
-	fmt.Println(color.HiBlackString("  3. Compare results and prove encryption works"))
-	fmt.Println()
-
-	color.Yellow("⚠️  Both VMs run identical Neo4j databases with NHS numbers")
-	color.Yellow("⚠️  Attack scenario: Root access to KVM host server")
+	if target == "pod" {
+		fmt.Println(color.HiBlackString("  1. Attack a STANDARD POD (runc, no encryption) → Data exposed ❌"))
+		fmt.Println(color.HiBlackString("  2. Attack a KATA-SNP POD (SEV-SNP sandbox) → Data protected ✅"))
+		fmt.Println(color.HiBlackString("  3. Compare results and prove encryption works"))
+		fmt.Println()
+		color.Yellow("⚠️  Attack scenario: Root access to the OpenShift worker node")
+	} else {
+		fmt.Println(color.HiBlackString("  1. Attack a STANDARD VM (no encryption) → Data exposed ❌"))
+		fmt.Println(color.HiBlackString("  2. Attack a CONFIDENTIAL VM (SEV-SNP) → Data protected ✅"))
+		fmt.Println(color.HiBlackString("  3. Compare results and prove encryption works"))
+		fmt.Println()
+		color.Yellow("⚠️  Both VMs run identical Neo4j databases with NHS numbers")
+		color.Yellow("⚠️  Attack scenario: Root access to KVM host server")
+	}
 	fmt.Println()
 
 	time.Sleep(2 * time.Second)
@@ -555,15 +565,13 @@ func printComparisonTable() {
 	fmt.Println(color.HiWhiteString("│ Security Feature        │ VM1 (Standard)   │ cVM (Protected)  │"))
 	fmt.Println(color.HiWhiteString("├─────────────────────────┼──────────────────┼──────────────────┤"))
 
-	// Helper function to pad colored text properly
 	padColored := func(text string, width int) string {
-		// Calculate visual length (excluding ANSI codes)
 		visualLen := len(stripAnsi(text))
 		padding := width - visualLen
 		if padding < 0 {
 			padding = 0
 		}
-		return text + string(make([]byte, padding))
+		return text + strings.Repeat(" ", padding)
 	}
 
 	// TLS row
