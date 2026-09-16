@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/enclaive/vmgrab/pkg/backend"
+	"github.com/enclaive/vmgrab/pkg/dumpmeta"
 )
 
 func init() {
@@ -214,19 +215,50 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 	// Try to find QMP socket
 	qmpSocket := b.findQMPSocket(vm.PID)
 
+	var path string
 	if qmpSocket != "" && b.canConnectQMP(qmpSocket) {
 		// Use direct QMP
 		if b.Verbose {
 			fmt.Printf("→ Using QMP socket: %s\n", qmpSocket)
 		}
-		return b.dumpViaQMP(qmpSocket, outputPath)
+		path, err = b.dumpViaQMP(qmpSocket, outputPath)
+	} else {
+		// Fall back to virsh qemu-monitor-command (works when libvirt manages QMP)
+		if b.Verbose {
+			fmt.Printf("→ QMP socket not accessible, using virsh qemu-monitor-command\n")
+		}
+		path, err = b.dumpViaVirsh(vmName, outputPath)
+	}
+	if err != nil {
+		return "", err
 	}
 
-	// Fall back to virsh qemu-monitor-command (works when libvirt manages QMP)
-	if b.Verbose {
-		fmt.Printf("→ QMP socket not accessible, using virsh qemu-monitor-command\n")
+	b.writeMeta(path, vm)
+	return path, nil
+}
+
+// writeMeta records what was dumped next to the dump file. The decisive field
+// is Security: it carries the confidential-computing status detected from the
+// QEMU command line at dump time. Without it, `search` cannot tell a protected
+// guest from a VM whose kernel simply was not resident yet, since both look
+// identical by content (no guest-kernel structures present). Failure to write
+// the sidecar is not fatal: the dump itself is still valid.
+func (b *Backend) writeMeta(dumpPath string, vm *backend.VM) {
+	size := statSizeSudo(dumpPath)
+	if size < 0 {
+		size = 0
 	}
-	return b.dumpViaVirsh(vmName, outputPath)
+	m := &dumpmeta.Meta{
+		Backend:   "qemu",
+		Target:    vm.Name,
+		PID:       vm.PID,
+		Security:  vm.Security,
+		Size:      size,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := m.Write(dumpPath); err != nil && b.Verbose {
+		fmt.Printf("→ could not write %s sidecar: %v\n", dumpmeta.Suffix, err)
+	}
 }
 
 // canConnectQMP checks if we can connect to the QMP socket
@@ -291,7 +323,7 @@ func (b *Backend) dumpViaQMP(socketPath string, outputPath string) (string, erro
 	}
 
 	// Make dump file readable
-	exec.Command("sudo", "chmod", "644", outputPath).Run()
+	exec.Command("sudo", "-n", "chmod", "644", outputPath).Run()
 
 	return outputPath, nil
 }
@@ -375,7 +407,7 @@ func statSizeSudo(path string) int64 {
 	if info, err := os.Stat(path); err == nil {
 		return info.Size()
 	}
-	out, err := exec.Command("sudo", "stat", "-c", "%s", path).Output()
+	out, err := exec.Command("sudo", "-n", "stat", "-c", "%s", path).Output()
 	if err != nil {
 		return -1
 	}
@@ -408,7 +440,7 @@ func (b *Backend) dumpViaVirsh(vmName string, outputPath string) (string, error)
 	}
 
 	// Make dump file readable
-	exec.Command("sudo", "chmod", "644", outputPath).Run()
+	exec.Command("sudo", "-n", "chmod", "644", outputPath).Run()
 
 	return outputPath, nil
 }
@@ -418,7 +450,7 @@ func (b *Backend) GetFileSize(path string) (int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		// Try with sudo
-		cmd := exec.Command("sudo", "stat", "-c", "%s", path)
+		cmd := exec.Command("sudo", "-n", "stat", "-c", "%s", path)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return 0, fmt.Errorf("stat failed: %w", err)

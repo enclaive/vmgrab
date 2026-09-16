@@ -482,3 +482,36 @@ func TestClassifyDump_ELFCore_SharedIOPlaintext(t *testing.T) {
 		t.Errorf("fixture should contain readable runs, got 0")
 	}
 }
+
+// TestClassifyDump_ELFCore_UnprotectedAtBootloader pins down what content alone
+// can and cannot prove. An UNPROTECTED VM sitting in its bootloader has fully
+// readable guest memory, yet carries no kernel banner and no kernel structures,
+// exactly like a protected guest. The classifier must therefore return
+// VerdictVMCoreNoBanner and must NOT return an "encrypted" verdict: deciding
+// between the two requires the confidential-computing status recorded in the
+// dump's metadata sidecar, not byte statistics.
+func TestClassifyDump_ELFCore_UnprotectedAtBootloader(t *testing.T) {
+	note := readableBlob(8 << 10)
+	load := make([]byte, 4<<20)
+	grub := []byte("GNU GRUB version 2.06  menuentry 'Debian GNU/Linux' set root='hd0,gpt2' linux /vmlinuz ro quiet ")
+	for i := 0; i+len(grub) < (1 << 20); i += 128 {
+		copy(load[i:], grub)
+	}
+	data := buildELFCore(t, []coreSeg{{ptNote, note}, {ptLoad, load}})
+	path := writeFixture(t, "plain_at_grub.dump", data)
+	s := New(path, false)
+
+	c, err := s.ClassifyDump()
+	if err != nil {
+		t.Fatalf("ClassifyDump: %v", err)
+	}
+	if c.HasLinuxBanner {
+		t.Fatalf("fixture must not contain a kernel banner")
+	}
+	if c.Verdict == VerdictEncrypted {
+		t.Errorf("unprotected VM in bootloader classified as %q; content cannot prove encryption", c.Verdict)
+	}
+	if c.Verdict != VerdictVMCoreNoBanner {
+		t.Errorf("Verdict = %q, want %q", c.Verdict, VerdictVMCoreNoBanner)
+	}
+}

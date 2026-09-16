@@ -193,7 +193,7 @@ func printNoMatchVerdict(s *search.Searcher, pattern string, meta *dumpmeta.Meta
 		}
 	}
 
-	printContentVerdict(s, pattern, c)
+	printContentVerdict(s, pattern, c, meta)
 }
 
 func displayKind(m *dumpmeta.Meta) string {
@@ -258,7 +258,7 @@ func printPodKataVerdict(s *search.Searcher) {
 }
 
 // printContentVerdict is the meta-less path: decide from byte stats alone.
-func printContentVerdict(s *search.Searcher, pattern string, c *search.DumpClassification) {
+func printContentVerdict(s *search.Searcher, pattern string, c *search.DumpClassification, meta *dumpmeta.Meta) {
 	if c == nil {
 		color.Yellow("Could not analyze dump contents")
 		return
@@ -276,7 +276,7 @@ func printContentVerdict(s *search.Searcher, pattern string, c *search.DumpClass
 		color.HiBlack("Substantial printable content found; encryption is not active here.")
 		color.HiBlack("Pattern '%s' was not found; try different patterns.", pattern)
 	case search.VerdictVMCoreNoBanner:
-		printVMCoreVerdict(s, pattern, c)
+		printVMCoreVerdict(s, pattern, c, meta)
 	case search.VerdictEncrypted:
 		if c.IsELFCore {
 			// QEMU dump-guest-memory of an SEV-SNP guest: the ELF/core metadata
@@ -313,7 +313,7 @@ func printContentVerdict(s *search.Searcher, pattern string, c *search.DumpClass
 // Counting those as "readable" is what produced the false "encryption is not
 // active here" verdict reported in issue #8. The authoritative evidence is
 // whether guest-kernel structures are visible, so we run the fingerprint probe.
-func printVMCoreVerdict(s *search.Searcher, pattern string, c *search.DumpClassification) {
+func printVMCoreVerdict(s *search.Searcher, pattern string, c *search.DumpClassification, meta *dumpmeta.Meta) {
 	color.Cyan("🔬 QEMU core dump of a VM — probing for guest-kernel fingerprints")
 	color.HiBlack("These strings live in guest kernel memory. If the guest's private")
 	color.HiBlack("memory is encrypted, the host must not see any of them.")
@@ -344,8 +344,36 @@ func printVMCoreVerdict(s *search.Searcher, pattern string, c *search.DumpClassi
 		return
 	}
 
-	color.Green("✅ SEV-SNP PROTECTED — guest private memory is not readable from the host")
+	// Absence of guest-kernel structures has two possible causes: the guest's
+	// memory really is protected, or the guest kernel was simply not resident
+	// yet (VM sitting in firmware or a bootloader, or just started). Content
+	// alone cannot tell them apart, so only claim protection when the dump's
+	// sidecar records a confidential-computing technology detected at dump time.
+	tech := ""
+	if meta != nil {
+		tech = meta.Security
+	}
+
+	if tech == "" {
+		color.Yellow("ℹ️  INCONCLUSIVE — no guest-kernel structures found, protection not confirmed")
+		fmt.Println()
+		color.HiBlack("Guest kernel fingerprints: 0 of %d found in %s of guest LOAD segments.",
+			len(kernelFingerprintPatterns), formatBytes(c.LoadSegmentBytes))
+		color.HiBlack("That has two possible causes and this dump cannot distinguish them:")
+		color.HiBlack("  1. guest memory is encrypted, so the host cannot read it, or")
+		color.HiBlack("  2. the guest kernel was not in memory yet (VM still in firmware")
+		color.HiBlack("     or a bootloader), in which case the VM may be fully exposed.")
+		fmt.Println()
+		color.HiBlack("Run `vmgrab list` to see whether this target is a confidential VM, and")
+		color.HiBlack("re-dump once the guest has finished booting. Dumps taken by a current")
+		color.HiBlack("`vmgrab dump` record the detected technology in the %s sidecar,", dumpmeta.Suffix)
+		color.HiBlack("which makes this verdict definitive.")
+		return
+	}
+
+	color.Green("✅ %s PROTECTED — guest private memory is not readable from the host", tech)
 	fmt.Println()
+	color.HiBlack("Target was detected as %s when the dump was taken (%s sidecar).", tech, dumpmeta.Suffix)
 	color.HiBlack("ELF/core metadata is readable, as it is in any core file.")
 	color.HiBlack("Guest kernel fingerprints: 0 of %d found in %s of guest LOAD segments.",
 		len(kernelFingerprintPatterns), formatBytes(c.LoadSegmentBytes))
