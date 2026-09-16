@@ -1,160 +1,145 @@
-```                                                                                     
-                        ____                                        ,-.----.           
-                        ,'  , `.  ,----..   ,-.----.      ,---,       \    /  \          
-           ,---.     ,-+-,.' _ | /   /   \  \    /  \    '  .' \      |   :    \         
-          /__./|  ,-+-. ;   , |||   :     : ;   :    \  /  ;    '.    |   |  .\ :        
-     ,---.;  ; | ,--.'|'   |  ;|.   |  ;. / |   | .\ : :  :       \   .   :  |: |        
-    /___/ \  | ||   |  ,', |  ':.   ; /--`  .   : |: | :  |   /\   \  |   |   \ :        
-    \   ;  \ ' ||   | /  | |  ||;   | ;  __ |   |  \ : |  :  ' ;.   : |   : .   /        
-     \   \  \: |'   | :  | :  |,|   : |.' .'|   : .  / |  |  ;/  \   \;   | |`-'         
-      ;   \  ' .;   . |  ; |--' .   | '_.' :;   | |  \ '  :  | \  \ ,'|   | ;            
-       \   \   '|   : |  | ,    '   ; : \  ||   | ;\  \|  |  '  '--'  :   ' |            
-        \   `  ;|   : '  |/     '   | '/  .':   ' | \.'|  :  :        :   : :            
-         :   \ |;   | |`-'      |   :    /  :   : :-'  |  | ,'        |   | :            
-          '---" |   ;/           \   \ .'   |   |.'    `--''          `---'.|            
-                '---'             `---`     `---'                       `---`            
-                                                                                     
-
-                             VMgrab — VM memory dump validator
- 
- OffSec tool to validate VM memory encryption and confidential computing enablement.
- Use for authorised penetration tests and security assessments only.
-
- [!] AUTHORIZED TESTING ONLY — Run only against systems you own or have explicit written permission to test.
- (c) 2025 enclaive.io   |  Repo: https://github.com/enclaive/vmgrab  |  License: MIT
-
-🎯 Attacking VM: neo4j-vm1
-
-📥 [1/3] Dumping memory...
-━━━━━━━━━━━━━━━━━━━━━━━━ 100% | 4.2 GB
-
-🔍 [2/3] Searching for pattern: 117-66-8129
-Found at offset 0x2a4f8000:
-  ...NHS:117-66-8129,Name:John Smith...
-
-✅ Result: VULNERABLE - Sensitive data exposed!
-
 ```
-## TL;TR
+ ██╗   ██╗███╗   ███╗ ██████╗ ██████╗  █████╗ ██████╗
+ ██║   ██║████╗ ████║██╔════╝ ██╔══██╗██╔══██╗██╔══██╗
+ ██║   ██║██╔████╔██║██║  ███╗██████╔╝███████║██████╔╝
+ ╚██╗ ██╔╝██║╚██╔╝██║██║   ██║██╔══██╗██╔══██║██╔══██╗
+  ╚████╔╝ ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██████╔╝
+   ╚═══╝  ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝
+```
 
-Standard virtual machines expose plaintext code and data in guest RAM. Confidential VMs (e.g., AMD SEV-SNP, Intel TDX) aim to keep guest memory encrypted at runtime and to minimize the hypervisor/host attack surface. VMgrab is an offensive security tool for technical assessors that automates VM memory acquisition techniques and produces forensic artifacts and test vectors to evaluate whether confidentiality guarantees hold in practice. It is designed for use by pentesters, red-teamers, auditors and incident responders to empirically validate encryption/attestation behaviour, identify implementation gaps, and document reproducible findings.
+# VMgrab
 
-## What VMgrab is about
-Virtual machines expose volatile guest state — code, secrets and runtime data — in RAM. Confidential VM technologies (notably AMD SEV-SNP and Intel TDX) provide runtime memory encryption and associated attestation mechanisms to constrain host/hypervisor visibility. VMgrab is an offensive engineering toolset that:
+VMgrab dumps the memory of a VM, pod or GPU from the host and searches it for
+secrets. It answers one question empirically: **can the hypervisor operator read
+what is inside the guest?**
 
-- automates controlled VM memory acquisition using host-level acquisition vectors common to cloud and on-prem hypervisors;
-- produces canonical memory dumps and audit artifacts for repeatable analysis;
-- exercises and verifies confidentiality and attestation assertions (e.g., whether pages remain encrypted at rest/in transit, whether firmware/host components leak guest plaintext, and how guest keys/TEEs are managed);
-- helps quantify real-world attack surface and implementation gaps in SEV/TDX deployments, and generates evidence suitable for technical reports and remediation planning.
+On a standard VM the answer is yes, and VMgrab shows the plaintext. On an AMD
+SEV-SNP or Intel TDX guest the answer should be no, and VMgrab shows that guest
+memory is unreadable. That contrast is the demo, the audit evidence and the
+regression test.
 
-Intended audience: 
-- experienced offensive security engineers
-- forensic analysts 
-- systems architects performing authorized security assessments
+> **Authorized testing only.** Run only against systems you own or have explicit
+> written permission to test. See `SECURITY.md`.
 
-Use Cases:
+## What it does
 
-- Security research and penetration testing
-- Confidential computing demonstrations
-- Educational workshops on memory encryption
-- Compliance audits (proving data protection)
+- Acquires guest memory from the host through four backends and writes a dump
+  plus a `.meta.json` sidecar describing what was captured.
+- Detects SEV-SNP / SEV / TDX per target from the QEMU command line.
+- Searches dumps for regex patterns and classifies the outcome: readable guest
+  memory, protected guest memory, or host process memory.
+- Reads NVIDIA GPU VRAM from the host and proves whether a model loaded on the
+  card is extractable when GPU confidential computing is off.
 
-
-**Important note: Use only on assets for which you have explicit written permission.**
-
-## Features
-
-- **Multi-backend memory dump support:**
-  - `procmem` — Universal `/proc/pid/mem` based dump (works on any hypervisor, including Kata Containers)
-  - `libvirt` — virsh-based dump for libvirt-managed VMs
-  - `qemu` — Direct QMP socket communication
-- Search memory dumps for sensitive data (NHS numbers, SSNs, emails, etc.)
-- Compare classical VMs vs confidential VMs (cVMs with memory encryption)
-- Automatic SEV-SNP/SEV/TDX detection from QEMU command line
-- Run automated attacks against the enclave
-
+Intended for offensive security engineers, forensic analysts and architects
+running authorized assessments, confidential-computing demos and compliance
+evidence collection.
 
 ## Requirements
 
-- Linux host OS with KVM/QEMU
-- `sudo` privileges (for `/proc/pid/mem` access)
-- Go 1.22+ (for building from source)
-- Optional: `virsh` for libvirt backend
+- Linux host with KVM/QEMU
+- `sudo`, for `/proc/pid/mem` and QMP access
+- Go 1.22+ to build
+- `virsh` only for the libvirt backend, `crictl` only for the pod backend
 
-## Installation
+## Install
 
 ```bash
-# Build using Makefile (recommended - includes version info)
-make build
-
-# The binary will be in bin/vmgrab
+make build           # builds bin/vmgrab with version info
 ./bin/vmgrab --version
+make install         # optional, installs to /usr/local/bin
+```
 
-# Or install to /usr/local/bin
-make install
+## Commands
 
-# Or build manually
-go build -o bin/vmgrab
+| Command | Purpose |
+|---|---|
+| `list` | List VMs and pods with detected security status |
+| `dump` | Dump VM or pod memory to a file plus metadata sidecar |
+| `search` | Search a dump for a pattern and classify the result |
+| `attack` | Dump, search and clean up in one step against one target |
+| `demo` | Automated side-by-side comparison of a standard and a confidential target |
+| `disk-search` | Search VM disk images from the host, to show LUKS at rest |
+| `gpu` | List GPUs and read VRAM: `list`, `search`, `dump`, `verify-model` |
+| `config` | Manage configuration: `init`, `show`, `validate` |
+
+## Backends
+
+| Backend | Method | Best for |
+|---|---|---|
+| `procmem` | `/proc/pid/mem` | Default. Any QEMU process, including Kata |
+| `qemu` | QMP `dump-guest-memory` | ELF core of guest RAM, direct or via virsh |
+| `libvirt` | `virsh dump --memory-only` | libvirt-managed VMs |
+| `pod` | `crictl` plus `/proc/pid/mem` | CRI pods: runc containers and Kata-SNP sandboxes |
+
+Select one with `--backend`, otherwise VMgrab auto-detects.
+
+## Usage
+
+List targets and their detected protection:
+
+```console
+$ sudo vmgrab list
+PID     NAME          STATE       KIND   SECURITY
+1234    cvm-guest     ● running   vm     🔒 SEV-SNP
+5678    plain-guest   ● running   vm     ⚠️  Unprotected
+```
+
+Dump and search a target:
+
+```bash
+sudo vmgrab dump cvm-guest --backend qemu -o /var/tmp
+vmgrab search /var/tmp/cvm-guest-*.dump "POSTGRES_PASSWORD="
+```
+
+On an unprotected VM the guest kernel is visible from the host:
+
+```console
+❌ NOT ENCRYPTED — Linux kernel banner found in dump
+```
+
+On a SEV-SNP guest the same command cannot reach guest memory:
+
+```console
+🔬 QEMU core dump of a VM — probing for guest-kernel fingerprints
+   Linux version [0-9]+\.[0-9]+\.[0-9]+     ✓ not found
+   swapper/0                                ✓ not found
+   __init_task                              ✓ not found
+   CONFIG_SEV_GUEST                         ✓ not found
+
+✅ SEV-SNP PROTECTED — guest private memory is not readable from the host
+```
+
+### Reading readable bytes correctly
+
+A confidential VM does not encrypt everything. Its shared I/O buffers, virtio
+and DMA rings, firmware tables and the ELF core metadata are plaintext by
+design. A SEV-SNP dump therefore still contains readable strings, and their
+presence alone does not mean the guest is exposed.
+
+VMgrab decides with the guest-kernel fingerprint probe instead of counting
+readable bytes. If guest kernel structures are absent, private memory is
+protected, and anything readable came from the shared surface. A secret found
+there travelled over virtio and is a workload issue, not a SEV-SNP failure.
+
+## Pods and GPUs
+
+```bash
+sudo vmgrab dump my-ns/my-pod --backend pod -o /var/tmp   # every container in the pod
+sudo vmgrab gpu list                                      # cards, CC mode, VRAM readability
+sudo vmgrab gpu verify-model d1:00.0 ./model.gguf         # is the model extractable from VRAM
 ```
 
 ## Configuration
 
-Create a `.vmgrab.yaml` config file for custom settings:
-
 ```bash
-./bin/vmgrab config init
+vmgrab config init      # writes .vmgrab.yaml
+vmgrab config show
 ```
 
-See `.vmgrab.yaml.example` for configuration options.
+See `.vmgrab.yaml.example` for the available options, and `CONTRIBUTING.md`
+before opening a pull request.
 
+---
 
-## Commands
-
-- `list` - List all VMs with security status (SEV-SNP vs Vulnerable)
-- `dump` - Dump VM memory to file
-- `search` - Search memory dump for patterns (regex supported)
-- `attack` - Complete attack demo on single VM (dump + search + cleanup)
-- `demo` - Full automated demonstration comparing standard vs confidential VMs
-- `disk-search` - Search VM disk files from host (proves LUKS encryption)
-- `config` - Manage configuration (init, show, validate)
-
-## Usage Example
-
-```bash
-# List all VMs with security status
-./bin/vmgrab list
-
-# Dump VM memory (auto-selects best backend: procmem)
-sudo ./bin/vmgrab dump <vm-name> -o /tmp
-
-# Force specific backend
-sudo ./bin/vmgrab dump <vm-name> -o /tmp --backend procmem
-sudo ./bin/vmgrab dump <vm-name> -o /tmp --backend libvirt
-
-# Search memory dump for patterns
-./bin/vmgrab search /tmp/<vm-name>-*.dump "password"
-./bin/vmgrab search /tmp/<vm-name>-*.dump "123-45-6789"
-
-# Run complete attack on single VM
-sudo ./bin/vmgrab attack <vm-name> --pattern "sensitive-data"
-
-# Run full demo (standard VM vs confidential VM)
-sudo ./bin/vmgrab demo
-```
-
-## Backends
-
-| Backend | Method | Best For |
-|---------|--------|----------|
-| `procmem` (default) | `/proc/pid/mem` | Universal - works everywhere including Kata |
-| `libvirt` | `virsh dump --memory-only` | libvirt-managed VMs |
-| `qemu` | QMP `dump-guest-memory` | Direct QEMU access |
-
-The default backend is `procmem` as it works on any Linux system with QEMU processes, including:
-- Standard libvirt VMs
-- Kata Containers (where QMP socket is occupied by runtime)
-- Any direct QEMU process
-
-
-
-
+(c) 2025 enclaive.io · MIT License · https://github.com/enclaive/vmgrab
