@@ -2,6 +2,7 @@ package search
 
 import (
 	"bytes"
+	"debug/elf"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -430,9 +431,6 @@ func (s *Searcher) LooksLikeVsockSharedBuffer(matchOffset int64) (bool, string) 
 // Returns true if Linux banner is found (memory is NOT encrypted)
 // Returns false if Linux banner is NOT found (memory is likely encrypted)
 func (s *Searcher) CheckLinuxBanner() (bool, error) {
-	// Linux kernel banner pattern - this is a static string in the kernel
-	// that should always be present in unencrypted memory dumps
-	// Reference: https://blogs.oracle.com/linux/live-kernel-debugging-2
 	pattern := `Linux version [0-9]+\.[0-9]+\.[0-9]+`
 
 	matches, err := s.Search(pattern, 1)
@@ -440,8 +438,276 @@ func (s *Searcher) CheckLinuxBanner() (bool, error) {
 		return false, fmt.Errorf("baseline check failed: %w", err)
 	}
 
-	// If we found the Linux banner, memory is NOT encrypted
 	return len(matches) > 0, nil
+}
+
+// DumpVerdict is the result of ClassifyDump.
+type DumpVerdict string
+
+const (
+	// VerdictEncrypted: dump contents look consistent with confidential-VM
+	// private memory as seen from the host (almost entirely zero pages, no
+	// kernel banner, no significant printable content).
+	VerdictEncrypted DumpVerdict = "encrypted"
+	// VerdictUnencryptedVM: a Linux kernel banner is present, so this is an
+	// unencrypted VM RAM dump.
+	VerdictUnencryptedVM DumpVerdict = "unencrypted-vm"
+	// VerdictUnencryptedProcess: no kernel banner but the dump contains
+	// substantial printable content (process heap / anon pages of a runc
+	// container or any /proc/PID/mem dump).
+	VerdictUnencryptedProcess DumpVerdict = "unencrypted-process"
+	// VerdictAmbiguous: too little signal to decide (very small dump, or a
+	// mix of zeros and random bytes without a clear majority class).
+	VerdictAmbiguous DumpVerdict = "ambiguous"
+	// VerdictVMCoreNoBanner: the dump is a QEMU ELF core of a VM and no guest
+	// kernel banner is present. Readable bytes in such a dump do NOT imply the
+	// guest is unencrypted: a SEV-SNP guest keeps private memory encrypted but
+	// its shared I/O buffers (virtio/DMA rings, firmware tables) are plaintext
+	// by design, and the ELF/core metadata is always readable. Deciding
+	// protected vs vulnerable requires the guest-kernel fingerprint probe, so
+	// this verdict defers to the caller instead of guessing from byte ratios.
+	// See issue #8: counting printable runs over such a dump produced a false
+	// "READABLE DUMP — encryption is not active here" on a protected guest.
+	VerdictVMCoreNoBanner DumpVerdict = "vm-core-no-banner"
+)
+
+// DumpClassification summarises a content-based heuristic over the dump file.
+type DumpClassification struct {
+	Verdict        DumpVerdict
+	HasLinuxBanner bool
+	ZeroRatio      float64 // fraction of scanned bytes equal to 0x00
+	PrintableRatio float64 // fraction of scanned bytes that are printable ASCII
+	SampledBytes   int     // total scanned bytes used for the ratios
+	ReadableRuns   int     // count of printable-ASCII runs >= classifyReadableRunLen
+	FileSize       int64
+	// IsELFCore is true when the dump is an ELF core file (QEMU
+	// dump-guest-memory output). When set, the ratios and ReadableRuns above
+	// are computed ONLY over PT_LOAD segment bytes (the guest memory), not the
+	// ELF headers / PT_NOTE metadata, which are always readable.
+	IsELFCore        bool
+	LoadSegmentBytes int64 // sum of PT_LOAD Filesz (bytes of guest memory in the file)
+}
+
+// Thresholds for ClassifyDump. Tuned against real dumps:
+//   - SEV-SNP dump from the host: the guest's private pages read back as
+//     0x00, so the file is ~100% zeros with NO printable-ASCII strings at all.
+//   - Any unencrypted VM / process dump always carries readable ASCII strings
+//     (kernel/GRUB text, configs, JSON, env vars), even when the resident set
+//     is tiny relative to the allocated region and the file is mostly zeros.
+//
+// The decisive signal is therefore the presence of real ASCII strings (runs of
+// printable bytes), counted over the WHOLE file, not the zero ratio. Counting
+// strings rather than sampling byte ratios is what fixes the false "ENCRYPTED"
+// verdict on sparse plain-VM dumps: a 4 GB guest-RAM dump whose ~40 MB resident
+// data sits in the low addresses is ~99% zeros, so any middle-of-file sample
+// reads all zeros and wrongly looks encrypted.
+const (
+	classifyZeroEncryptedMin = 0.95
+	classifyMinScanBytes     = 4096
+	// A printable-ASCII run of at least this length counts as a "string".
+	classifyReadableRunLen = 10
+	// At least this many strings means the dump carries readable content and
+	// is not an encrypted-from-host image (which has none).
+	classifyReadableRunsMin = 16
+)
+
+// ClassifyDump runs a content-based heuristic over the dump file and returns
+// a verdict plus the raw signals it used. It streams the WHOLE file once and
+// combines three signals:
+//
+//  1. Linux kernel banner search (the original baseline).
+//  2. Count of printable-ASCII strings (runs >= classifyReadableRunLen).
+//  3. Ratio of zero bytes across the file.
+//
+// The string count is the decisive signal. An encrypted-from-host image is all
+// zeros and contains no strings; any unencrypted VM or process dump always
+// carries readable strings even when the file is mostly zeros (sparse resident
+// set). See the threshold block above for why this replaces middle-of-file
+// sampling, which produced false "ENCRYPTED" verdicts on sparse plain-VM dumps.
+//
+// Decision order:
+//
+//   - Banner present -> UnencryptedVM.
+//   - ReadableRuns >= classifyReadableRunsMin -> UnencryptedProcess.
+//   - ZeroRatio >= classifyZeroEncryptedMin -> Encrypted.
+//   - Otherwise -> Ambiguous.
+func (s *Searcher) ClassifyDump() (*DumpClassification, error) {
+	info, err := os.Stat(s.FilePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat dump: %w", err)
+	}
+
+	// A QEMU dump-guest-memory output is an ELF core file whose guest RAM lives
+	// in PT_LOAD segments; the ELF headers and PT_NOTE metadata are always
+	// readable ASCII. On an SEV-SNP guest the PT_LOAD bytes read back as zeros,
+	// but the readable metadata would trip the string-count heuristic and yield
+	// a false "READABLE" verdict (issue #8). When the dump is an ELF core we
+	// therefore restrict the content scan to the PT_LOAD ranges only.
+	isELF, loadRanges := s.elfCoreLoadRanges()
+
+	scanRanges := loadRanges
+	if !isELF || len(loadRanges) == 0 {
+		scanRanges = []byteRange{{0, info.Size()}}
+	}
+
+	var loadBytes int64
+	for _, r := range scanRanges {
+		loadBytes += r.length
+	}
+
+	banner, err := s.CheckLinuxBanner()
+	if err != nil {
+		return nil, err
+	}
+
+	zeroRatio, printableRatio, scanned, runs, err := s.scanContent(scanRanges)
+	if err != nil {
+		return nil, err
+	}
+
+	c := &DumpClassification{
+		HasLinuxBanner: banner,
+		ZeroRatio:      zeroRatio,
+		PrintableRatio: printableRatio,
+		SampledBytes:   scanned,
+		ReadableRuns:   runs,
+		FileSize:       info.Size(),
+		IsELFCore:      isELF,
+	}
+	if isELF && len(loadRanges) > 0 {
+		c.LoadSegmentBytes = loadBytes
+	}
+
+	switch {
+	case banner:
+		c.Verdict = VerdictUnencryptedVM
+	case scanned < classifyMinScanBytes:
+		c.Verdict = VerdictAmbiguous
+	case isELF:
+		// A VM core dump with no kernel banner. Readable content here is
+		// expected even on a protected guest (shared I/O buffers, firmware
+		// tables, ELF metadata), so the printable-run count below must not be
+		// allowed to declare it unencrypted. The caller confirms with the
+		// guest-kernel fingerprint probe.
+		c.Verdict = VerdictVMCoreNoBanner
+	case runs >= classifyReadableRunsMin:
+		c.Verdict = VerdictUnencryptedProcess
+	case zeroRatio >= classifyZeroEncryptedMin:
+		c.Verdict = VerdictEncrypted
+	default:
+		c.Verdict = VerdictAmbiguous
+	}
+
+	return c, nil
+}
+
+// byteRange is a half-open [offset, offset+length) span in the dump file.
+type byteRange struct {
+	offset int64
+	length int64
+}
+
+// elfCoreLoadRanges reports whether the dump is an ELF core file and, if so,
+// returns the file byte ranges of its PT_LOAD segments (guest memory). It
+// returns (false, nil) for non-ELF dumps (procmem / raw VM RAM) and on any
+// parse error, so the caller falls back to a whole-file scan.
+func (s *Searcher) elfCoreLoadRanges() (bool, []byteRange) {
+	f, err := os.Open(s.FilePath)
+	if err != nil {
+		return false, nil
+	}
+	defer f.Close()
+
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(f, magic); err != nil {
+		return false, nil
+	}
+	if !bytes.Equal(magic, []byte("\x7fELF")) {
+		return false, nil
+	}
+
+	ef, err := elf.NewFile(f)
+	if err != nil {
+		return false, nil
+	}
+	defer ef.Close()
+
+	var ranges []byteRange
+	for _, p := range ef.Progs {
+		if p.Type == elf.PT_LOAD && p.Filesz > 0 {
+			ranges = append(ranges, byteRange{offset: int64(p.Off), length: int64(p.Filesz)})
+		}
+	}
+	return true, ranges
+}
+
+// scanContent streams the given byte ranges of the dump file once and reports
+// (zeroRatio, printableRatio, totalScanned, readableRuns) over just those
+// ranges. For a raw dump the caller passes the whole file; for an ELF core it
+// passes only the PT_LOAD ranges so ELF metadata does not skew the signals.
+//
+// readableRuns counts maximal runs of printable ASCII at least
+// classifyReadableRunLen bytes long, tracked across read-buffer boundaries but
+// reset at each range boundary. It stops counting (but keeps reading for the
+// ratios) once the threshold is comfortably exceeded, so a plain dump never
+// pays for counting millions of strings while an encrypted (all-zero) dump is
+// still scanned in full and correctly reports zero strings.
+func (s *Searcher) scanContent(ranges []byteRange) (float64, float64, int, int, error) {
+	f, err := os.Open(s.FilePath)
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("open dump: %w", err)
+	}
+	defer f.Close()
+
+	const bufSize = 4 * 1024 * 1024
+	buf := make([]byte, bufSize)
+
+	var zeros, printable, total int
+	var runs int
+	const runStop = classifyReadableRunsMin * 4
+
+	for _, rg := range ranges {
+		if _, err := f.Seek(rg.offset, io.SeekStart); err != nil {
+			return 0, 0, 0, 0, fmt.Errorf("seek dump: %w", err)
+		}
+		remaining := rg.length
+		curRun := 0 // runs do not span range boundaries
+		for remaining > 0 {
+			toRead := int64(bufSize)
+			if remaining < toRead {
+				toRead = remaining
+			}
+			n, readErr := f.Read(buf[:toRead])
+			for _, b := range buf[:n] {
+				if b == 0 {
+					zeros++
+				} else if IsPrintable(b) {
+					printable++
+				}
+				if IsPrintable(b) {
+					curRun++
+					if curRun == classifyReadableRunLen && runs < runStop {
+						runs++
+					}
+				} else {
+					curRun = 0
+				}
+			}
+			total += n
+			remaining -= int64(n)
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				return 0, 0, 0, 0, fmt.Errorf("read dump: %w", readErr)
+			}
+		}
+	}
+
+	if total == 0 {
+		return 0, 0, 0, 0, nil
+	}
+	return float64(zeros) / float64(total), float64(printable) / float64(total), total, runs, nil
 }
 
 // FormatHex formats bytes as hex dump
