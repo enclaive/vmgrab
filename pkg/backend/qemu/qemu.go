@@ -244,19 +244,7 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 // identical by content (no guest-kernel structures present). Failure to write
 // the sidecar is not fatal: the dump itself is still valid.
 func (b *Backend) writeMeta(dumpPath string, vm *backend.VM) {
-	size := statSizeSudo(dumpPath)
-	if size < 0 {
-		size = 0
-	}
-	m := &dumpmeta.Meta{
-		Backend:   "qemu",
-		Target:    vm.Name,
-		PID:       vm.PID,
-		Security:  vm.Security,
-		Size:      size,
-		CreatedAt: time.Now().UTC(),
-	}
-	if err := m.Write(dumpPath); err != nil && b.Verbose {
+	if err := dumpmeta.WriteVM(dumpPath, "qemu", vm.Name, vm.PID, vm.Security); err != nil && b.Verbose {
 		fmt.Printf("→ could not write %s sidecar: %v\n", dumpmeta.Suffix, err)
 	}
 }
@@ -376,13 +364,19 @@ func (b *Backend) qmpAwaitReply(reader *bufio.Reader, id string) (map[string]int
 }
 
 // waitFileStable polls the dump file size until it stops changing across two
-// consecutive samples, or a 30s timeout elapses. This guards against the file
+// consecutive samples, or a timeout elapses. This guards against the file
 // still being flushed after the QMP reply. The dump is created by QEMU with
 // restrictive permissions, so size is read via sudo when os.Stat is denied.
 func waitFileStable(path string, verbose bool) error {
+	return waitFileStableFor(path, verbose, 30*time.Second, 300*time.Millisecond)
+}
+
+// waitFileStableFor is waitFileStable with the timing exposed, so the polling
+// behaviour can be exercised by tests without waiting the production timeout.
+func waitFileStableFor(path string, verbose bool, timeout, interval time.Duration) error {
 	var last int64 = -1
 	stable := 0
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		size := statSizeSudo(path)
 		if size >= 0 && size == last {
@@ -396,9 +390,9 @@ func waitFileStable(path string, verbose bool) error {
 			stable = 0
 		}
 		last = size
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(interval)
 	}
-	return fmt.Errorf("file size not stable after 30s (last=%d)", last)
+	return fmt.Errorf("file size not stable after %s (last=%d)", timeout, last)
 }
 
 // statSizeSudo returns the file size, falling back to `sudo stat` when the

@@ -176,6 +176,17 @@ func printNoMatchVerdict(s *search.Searcher, pattern string, meta *dumpmeta.Meta
 		fmt.Println()
 	}
 
+	if c != nil && c.Truncated {
+		color.Red("⚠️  TRUNCATED DUMP — this file is shorter than it claims to be")
+		fmt.Println()
+		color.HiBlack("Program headers declare %s of guest memory but the file holds %s.",
+			formatBytes(c.DeclaredBytes), formatBytes(c.FileSize))
+		color.HiBlack("A dump interrupted mid-write looks exactly like this, and a")
+		color.HiBlack("\"not found\" result on it means nothing: the data may be in the")
+		color.HiBlack("missing tail. Re-run `vmgrab dump` and let it finish before searching.")
+		fmt.Println()
+	}
+
 	if meta != nil {
 		color.HiBlack("Dump origin (from %s sidecar): backend=%s kind=%s target=%s pid=%d",
 			dumpmeta.Suffix, meta.Backend, displayKind(meta), meta.Target, meta.PID)
@@ -191,9 +202,56 @@ func printNoMatchVerdict(s *search.Searcher, pattern string, meta *dumpmeta.Meta
 			warnMetaContentMismatch(meta, c)
 			return
 		}
+
+		// Any whole-VM dump, whatever the on-disk format. The qemu backend
+		// writes an ELF core while procmem and libvirt write raw guest RAM,
+		// but the same guest produces the same evidence either way, so the
+		// verdict must not depend on the container format (issue #8).
+		if isVMDump(meta) {
+			if c != nil && c.HasLinuxBanner {
+				printBannerVulnerable(pattern)
+			} else {
+				printVMCoreVerdict(s, pattern, c, meta)
+			}
+			return
+		}
 	}
 
 	printContentVerdict(s, pattern, c, meta)
+}
+
+// isVMDump reports whether the sidecar describes a whole-VM memory dump as
+// opposed to a container process dump. Pod kinds are handled separately.
+func isVMDump(m *dumpmeta.Meta) bool {
+	if m.Kind != "" {
+		return false
+	}
+	switch m.Backend {
+	case "qemu", "libvirt", "procmem":
+		return true
+	}
+	return false
+}
+
+// printBannerVulnerable is the unambiguous case: the guest kernel banner is
+// readable from the host, so guest memory is not protected.
+func printBannerVulnerable(pattern string) {
+	color.Red("❌ NOT ENCRYPTED — guest kernel banner is readable from the host")
+	fmt.Println()
+	color.HiBlack("Guest memory is exposed; memory encryption is not protecting this VM.")
+	color.HiBlack("Pattern '%s' was not found; try different patterns.", pattern)
+}
+
+// guestBytesScanned reports how much guest memory the content scan covered.
+// For an ELF core that is the PT_LOAD total; for a raw dump it is everything.
+func guestBytesScanned(c *search.DumpClassification) string {
+	if c == nil {
+		return "0 B"
+	}
+	if c.IsELFCore && c.LoadSegmentBytes > 0 {
+		return formatBytes(c.LoadSegmentBytes)
+	}
+	return formatBytes(c.FileSize)
 }
 
 func displayKind(m *dumpmeta.Meta) string {
@@ -314,7 +372,7 @@ func printContentVerdict(s *search.Searcher, pattern string, c *search.DumpClass
 // active here" verdict reported in issue #8. The authoritative evidence is
 // whether guest-kernel structures are visible, so we run the fingerprint probe.
 func printVMCoreVerdict(s *search.Searcher, pattern string, c *search.DumpClassification, meta *dumpmeta.Meta) {
-	color.Cyan("🔬 QEMU core dump of a VM — probing for guest-kernel fingerprints")
+	color.Cyan("🔬 VM memory dump — probing for guest-kernel fingerprints")
 	color.HiBlack("These strings live in guest kernel memory. If the guest's private")
 	color.HiBlack("memory is encrypted, the host must not see any of them.")
 	fmt.Println()
@@ -357,8 +415,8 @@ func printVMCoreVerdict(s *search.Searcher, pattern string, c *search.DumpClassi
 	if tech == "" {
 		color.Yellow("ℹ️  INCONCLUSIVE — no guest-kernel structures found, protection not confirmed")
 		fmt.Println()
-		color.HiBlack("Guest kernel fingerprints: 0 of %d found in %s of guest LOAD segments.",
-			len(kernelFingerprintPatterns), formatBytes(c.LoadSegmentBytes))
+		color.HiBlack("Guest kernel fingerprints: 0 of %d found in %s of guest memory.",
+			len(kernelFingerprintPatterns), guestBytesScanned(c))
 		color.HiBlack("That has two possible causes and this dump cannot distinguish them:")
 		color.HiBlack("  1. guest memory is encrypted, so the host cannot read it, or")
 		color.HiBlack("  2. the guest kernel was not in memory yet (VM still in firmware")
@@ -374,9 +432,11 @@ func printVMCoreVerdict(s *search.Searcher, pattern string, c *search.DumpClassi
 	color.Green("✅ %s PROTECTED — guest private memory is not readable from the host", tech)
 	fmt.Println()
 	color.HiBlack("Target was detected as %s when the dump was taken (%s sidecar).", tech, dumpmeta.Suffix)
-	color.HiBlack("ELF/core metadata is readable, as it is in any core file.")
-	color.HiBlack("Guest kernel fingerprints: 0 of %d found in %s of guest LOAD segments.",
-		len(kernelFingerprintPatterns), formatBytes(c.LoadSegmentBytes))
+	if c != nil && c.IsELFCore {
+		color.HiBlack("ELF/core metadata is readable, as it is in any core file.")
+	}
+	color.HiBlack("Guest kernel fingerprints: 0 of %d found in %s of guest memory.",
+		len(kernelFingerprintPatterns), guestBytesScanned(c))
 	color.HiBlack("Pattern '%s' was not found.", pattern)
 	fmt.Println()
 	if c.ReadableRuns > 0 {

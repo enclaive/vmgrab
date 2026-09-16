@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/enclaive/vmgrab/pkg/backend"
+	"github.com/enclaive/vmgrab/pkg/dumpmeta"
 )
 
 func init() {
@@ -235,6 +236,13 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 	err = b.DumpMemoryRegion(vm.PID, guestRAM, outputPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to dump memory: %w", err)
+	}
+
+	// Record what was dumped, above all the detected confidential-computing
+	// status: a raw guest-RAM dump of a protected guest is indistinguishable
+	// by content from one of an unprotected guest whose kernel is not resident.
+	if err := dumpmeta.WriteVM(outputPath, "procmem", vm.Name, vm.PID, vm.Security); err != nil && b.Verbose {
+		fmt.Printf("→ could not write %s sidecar: %v\n", dumpmeta.Suffix, err)
 	}
 
 	return outputPath, nil

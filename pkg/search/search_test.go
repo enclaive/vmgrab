@@ -515,3 +515,45 @@ func TestClassifyDump_ELFCore_UnprotectedAtBootloader(t *testing.T) {
 		t.Errorf("Verdict = %q, want %q", c.Verdict, VerdictVMCoreNoBanner)
 	}
 }
+
+// TestClassifyDump_ELFCore_Truncated covers the artifact left behind by the
+// dump-completion bug in issue #8: a core file whose program headers describe
+// more guest memory than the file actually contains. A "not found" result on
+// such a dump is meaningless, so the classifier must flag it.
+func TestClassifyDump_ELFCore_Truncated(t *testing.T) {
+	note := readableBlob(8 << 10)
+	load := make([]byte, 1<<20)
+	data := buildELFCore(t, []coreSeg{{ptNote, note}, {ptLoad, load}})
+	cut := data[:len(data)/3] // interrupted mid-write
+	path := writeFixture(t, "truncated.dump", cut)
+	s := New(path, false)
+
+	c, err := s.ClassifyDump()
+	if err != nil {
+		t.Fatalf("ClassifyDump on a truncated file must not error: %v", err)
+	}
+	if !c.Truncated {
+		t.Errorf("Truncated = false, want true (declared %d bytes, file %d)", c.DeclaredBytes, c.FileSize)
+	}
+	if c.DeclaredBytes <= c.FileSize {
+		t.Errorf("DeclaredBytes %d should exceed FileSize %d", c.DeclaredBytes, c.FileSize)
+	}
+}
+
+// TestClassifyDump_ELFCore_NotTruncated guards the opposite direction: an
+// intact core file must never be flagged as truncated.
+func TestClassifyDump_ELFCore_NotTruncated(t *testing.T) {
+	note := readableBlob(8 << 10)
+	load := make([]byte, 1<<20)
+	data := buildELFCore(t, []coreSeg{{ptNote, note}, {ptLoad, load}})
+	path := writeFixture(t, "intact.dump", data)
+	s := New(path, false)
+
+	c, err := s.ClassifyDump()
+	if err != nil {
+		t.Fatalf("ClassifyDump: %v", err)
+	}
+	if c.Truncated {
+		t.Errorf("intact core flagged as truncated (declared %d, file %d)", c.DeclaredBytes, c.FileSize)
+	}
+}

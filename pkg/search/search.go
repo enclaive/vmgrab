@@ -486,6 +486,12 @@ type DumpClassification struct {
 	// ELF headers / PT_NOTE metadata, which are always readable.
 	IsELFCore        bool
 	LoadSegmentBytes int64 // sum of PT_LOAD Filesz (bytes of guest memory in the file)
+	// Truncated is set when the ELF program headers declare segments that
+	// extend past the end of the file. That means the dump was cut short,
+	// which is exactly what a dump interrupted mid-write looks like, and any
+	// "not found" result on such a file is unreliable.
+	Truncated        bool
+	DeclaredBytes    int64 // highest end offset declared by the program headers
 }
 
 // Thresholds for ClassifyDump. Tuned against real dumps:
@@ -545,9 +551,20 @@ func (s *Searcher) ClassifyDump() (*DumpClassification, error) {
 	// therefore restrict the content scan to the PT_LOAD ranges only.
 	isELF, loadRanges := s.elfCoreLoadRanges()
 
+	// Detect a dump that was cut short: program headers describing bytes that
+	// are not in the file. Searching such a dump produces false negatives.
+	var declaredEnd int64
+	for _, r := range loadRanges {
+		if end := r.offset + r.length; end > declaredEnd {
+			declaredEnd = end
+		}
+	}
+
 	scanRanges := loadRanges
 	if !isELF || len(loadRanges) == 0 {
 		scanRanges = []byteRange{{0, info.Size()}}
+	} else {
+		scanRanges = clampRanges(loadRanges, info.Size())
 	}
 
 	var loadBytes int64
@@ -573,6 +590,8 @@ func (s *Searcher) ClassifyDump() (*DumpClassification, error) {
 		ReadableRuns:   runs,
 		FileSize:       info.Size(),
 		IsELFCore:      isELF,
+		DeclaredBytes:  declaredEnd,
+		Truncated:      isELF && declaredEnd > info.Size(),
 	}
 	if isELF && len(loadRanges) > 0 {
 		c.LoadSegmentBytes = loadBytes
@@ -599,6 +618,24 @@ func (s *Searcher) ClassifyDump() (*DumpClassification, error) {
 	}
 
 	return c, nil
+}
+
+// clampRanges trims ranges to the actual end of the file, so a truncated dump
+// is scanned over what it really contains instead of erroring on a short read.
+func clampRanges(ranges []byteRange, size int64) []byteRange {
+	out := make([]byteRange, 0, len(ranges))
+	for _, r := range ranges {
+		if r.offset >= size {
+			continue
+		}
+		if r.offset+r.length > size {
+			r.length = size - r.offset
+		}
+		if r.length > 0 {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // byteRange is a half-open [offset, offset+length) span in the dump file.

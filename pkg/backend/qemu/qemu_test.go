@@ -135,3 +135,36 @@ func appendFile(t *testing.T, path string, data []byte) {
 		t.Fatalf("append write: %v", err)
 	}
 }
+
+// TestWaitFileStableFor_TimesOutWhileGrowing checks the bounded-wait behaviour:
+// a file that never stops growing must report an error rather than block or
+// silently claim the dump is complete.
+func TestWaitFileStableFor_TimesOutWhileGrowing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dump")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				appendFile(t, path, make([]byte, 1<<16))
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+	}()
+
+	err := waitFileStableFor(path, false, 1*time.Second, 50*time.Millisecond)
+	close(stop)
+	<-done
+
+	if err == nil {
+		t.Fatal("expected a timeout error for a continuously growing file, got nil")
+	}
+}

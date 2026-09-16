@@ -128,3 +128,26 @@ func Remove(dumpPath string) error {
 	}
 	return err
 }
+
+// WriteVM writes a sidecar for a whole-VM memory dump (qemu, libvirt or
+// procmem backends). The decisive field is security: it records the
+// confidential-computing technology detected on the QEMU command line at dump
+// time. Without it a reader cannot tell a protected guest from one whose
+// kernel was simply not resident yet, because both produce a dump with no
+// guest-kernel structures in it. Errors are returned but are not fatal to the
+// caller: the dump itself is still valid without a sidecar.
+func WriteVM(dumpPath, backendName, target string, pid int, security string) error {
+	size := int64(0)
+	if fi, err := os.Stat(dumpPath); err == nil {
+		size = fi.Size()
+	}
+	m := &Meta{
+		Backend:   backendName,
+		Target:    target,
+		PID:       pid,
+		Security:  security,
+		Size:      size,
+		CreatedAt: time.Now().UTC(),
+	}
+	return m.Write(dumpPath)
+}
