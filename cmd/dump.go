@@ -91,9 +91,9 @@ func runDump(cmd *cobra.Command, args []string) error {
 
 	// Show SEV status
 	if vm.Security != "" {
-		fmt.Printf("🔒 Security:       %s\n", color.GreenString("%s Protected", vm.Security))
+		fmt.Printf("🔒 Security:       %s\n", color.GreenString("%s configured", vm.Security))
 	} else {
-		fmt.Printf("⚠️  Security:       %s\n", color.RedString("No encryption"))
+		fmt.Printf("⚠️  Security:       %s\n", color.YellowString("Not detected"))
 	}
 
 	fmt.Printf("🔧 Backend:        %s\n", color.HiBlackString(b.Name()))
@@ -136,7 +136,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 	bar.Finish()
 
 	if err != nil {
-		return fmt.Errorf("failed to dump VM memory: %w", err)
+		return fmt.Errorf("capture failed (artifact: %s): %w", outputFile, err)
 	}
 
 	duration := time.Since(startTime)

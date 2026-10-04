@@ -24,7 +24,17 @@ func runList(cmd *cobra.Command, args []string) error {
 	verbose, _ := cmd.Flags().GetBool("verbose")
 
 	// Get VMs from all available backends
-	vms, err := backend.ListAll(verbose)
+	var vms []backend.VM
+	var err error
+	if backendName != "" {
+		b := GetBackend(verbose)
+		if b == nil {
+			return fmt.Errorf("backend unavailable: %s", backendName)
+		}
+		vms, err = b.List()
+	} else {
+		vms, err = backend.ListAll(verbose)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to list VMs: %w", err)
 	}
@@ -118,7 +128,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		if vm.Security != "" {
 			securityLabel = color.GreenString("🔒 " + vm.Security)
 		} else {
-			securityLabel = color.RedString("⚠️  Unprotected")
+			securityLabel = color.YellowString("Not detected")
 		}
 
 		if hasPods {

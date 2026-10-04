@@ -9,14 +9,13 @@
 
 # VMgrab
 
-VMgrab dumps the memory of a VM, pod or GPU from the host and searches it for
-secrets. It answers one question empirically: **can the hypervisor operator read
-what is inside the guest?**
+VMgrab captures memory of a VM, pod or GPU from the host and searches it for
+secrets. It reports which requested data is readable in the captured bytes,
+along with the recorded capture scope and completeness.
 
-On a standard VM the answer is yes, and VMgrab shows the plaintext. On an AMD
-SEV-SNP or Intel TDX guest the answer should be no, and VMgrab shows that guest
-memory is unreadable. That contrast is the demo, the audit evidence and the
-regression test.
+Comparing standard and confidential targets provides evidence about those
+captures. Absence of a pattern does not prove encryption or establish what is
+present in memory that the host could not capture.
 
 > **Authorized testing only.** Run only against systems you own or have explicit
 > written permission to test. See `SECURITY.md`.
@@ -26,8 +25,8 @@ regression test.
 - Acquires guest memory from the host through four backends and writes a dump
   plus a `.meta.json` sidecar describing what was captured.
 - Detects SEV-SNP / SEV / TDX per target from the QEMU command line.
-- Searches dumps for regex patterns and classifies the outcome: readable guest
-  memory, protected guest memory, or host process memory.
+- Searches memory dumps for regex patterns and reports `MATCH_FOUND`,
+  `NOT_FOUND` or `INCONCLUSIVE`, with capture coverage where available.
 - Reads NVIDIA GPU VRAM from the host and proves whether a model loaded on the
   card is extractable when GPU confidential computing is off.
 
@@ -82,7 +81,7 @@ make install         # optional, installs to /usr/local/bin
 | `procmem` | `/proc/pid/mem` | Default. Any QEMU process, including Kata |
 | `qemu` | QMP `dump-guest-memory` | ELF core of guest RAM, direct or via virsh |
 | `libvirt` | `virsh dump --memory-only` | libvirt-managed VMs |
-| `pod` | `crictl` plus `/proc/pid/mem` | CRI pods: runc containers and Kata-SNP sandboxes |
+| `pod` | `crictl` plus `/proc/pid/mem` | CRI process containers and QEMU sandboxes, including Kata and other QEMU-based runtimes |
 
 Select one with `--backend`, otherwise VMgrab auto-detects.
 
@@ -104,35 +103,36 @@ sudo vmgrab dump cvm-guest --backend qemu -o /var/tmp
 vmgrab search /var/tmp/cvm-guest-*.dump "POSTGRES_PASSWORD="
 ```
 
-On an unprotected VM the guest kernel is visible from the host:
+When the requested pattern is present:
 
 ```console
-❌ NOT ENCRYPTED — Linux kernel banner found in dump
+MATCH_FOUND: 1 displayed match(es)
 ```
 
-On a SEV-SNP guest the same command cannot reach guest memory:
+When the requested pattern is absent from a capture with no known incompleteness:
 
 ```console
-🔬 QEMU core dump of a VM — probing for guest-kernel fingerprints
-   Linux version [0-9]+\.[0-9]+\.[0-9]+     ✓ not found
-   swapper/0                                ✓ not found
-   __init_task                              ✓ not found
-   CONFIG_SEV_GUEST                         ✓ not found
-
-✅ SEV-SNP PROTECTED — guest private memory is not readable from the host
+NOT_FOUND: 0 displayed match(es)
 ```
+
+If no match is found and the capture is known to be incomplete, the result is
+`INCONCLUSIVE`. Known incompleteness causes a nonzero exit status even when a
+match is found. Legacy dumps with unknown coverage are identified explicitly.
 
 ### Reading readable bytes correctly
 
-A confidential VM does not encrypt everything. Its shared I/O buffers, virtio
-and DMA rings, firmware tables and the ELF core metadata are plaintext by
-design. A SEV-SNP dump therefore still contains readable strings, and their
-presence alone does not mean the guest is exposed.
+Readable data in a confidential target's capture may come from shared I/O,
+process buffers, the pod specification or application output. A match shows
+that those bytes are host-readable; it does not identify a guest-private memory
+leak by itself. Absence of guest-kernel strings does not prove protection.
 
-VMgrab decides with the guest-kernel fingerprint probe instead of counting
-readable bytes. If guest kernel structures are absent, private memory is
-protected, and anything readable came from the shared surface. A secret found
-there travelled over virtio and is a workload issue, not a SEV-SNP failure.
+When guest_memfd is detected, VMgrab records that its QEMU userspace capture
+does not capture the private memory backed by guest_memfd. Configured
+SEV/SNP/TDX is reported separately from search results and is not attestation.
+
+`demo` compares actual phase results and requires a successful positive control.
+See [memory capture and result semantics](docs/memory-results.md) for coverage,
+exit statuses and a reproducible comparison using synthetic data.
 
 ## Pods and GPUs
 

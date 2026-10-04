@@ -2,31 +2,11 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
-
 	"github.com/enclaive/vmgrab/pkg/backend"
 	"github.com/enclaive/vmgrab/pkg/config"
 	"github.com/enclaive/vmgrab/pkg/search"
-	"github.com/enclaive/vmgrab/pkg/virsh"
-	"github.com/enclaive/vmgrab/pkg/visualizer"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
-
-// kernelFingerprintPatterns are strings that, in a running Linux guest, live
-// in kernel .rodata / kernel symbols. Finding any of them in a memory dump
-// of a Kata-SNP pod means SEV-SNP is NOT actually encrypting the guest's
-// private memory — i.e. a real leak. Empirically validated 2026-04-22 on
-// Enclaive OCP SNO: all four return zero matches in a 16 GiB Kata dump.
-var kernelFingerprintPatterns = []string{
-	`Linux version [0-9]+\.[0-9]+\.[0-9]+`,
-	`swapper/0`,
-	`__init_task`,
-	`CONFIG_SEV_GUEST`,
-}
 
 var demoCmd = &cobra.Command{
 	Use:   "demo",
@@ -36,7 +16,7 @@ var demoCmd = &cobra.Command{
 2. Search for sensitive data in the standard dump
 3. Dump confidential target memory (Kata-SNP pod or SEV-SNP VM)
 4. Search for the same data in the confidential dump
-5. Show comparison table proving encryption works
+5. Compare observed results and check the positive control
 
 Target type is selected via --target=vm (default) or --target=pod;
 passing --standard-pod / --confidential-pod implies --target=pod.
@@ -88,560 +68,146 @@ func resolveDemoTarget(cfg *config.Config) string {
 }
 
 func runDemo(cmd *cobra.Command, args []string) error {
-	// Load configuration
-	cfg, err := getConfig(cmd)
+	cfg, err := config.Load("")
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return err
 	}
-
-	// Get search pattern (priority: flags > config > error)
 	pattern := demoPattern
-	patternName := demoPatternName
-	if pattern == "" {
-		if len(cfg.Search) == 0 {
-			return fmt.Errorf("no search pattern specified (use --pattern or configure in .vmgrab.yaml)")
-		}
+	if pattern == "" && len(cfg.Search) > 0 {
 		pattern = cfg.Search[0].Pattern
-		patternName = cfg.Search[0].Name
 	}
-
-	if patternName == "" {
-		patternName = "Sensitive Data"
+	if err := search.ValidatePattern(pattern, 5); err != nil {
+		return err
 	}
-
 	verbose, _ := cmd.Flags().GetBool("verbose")
-
 	target := resolveDemoTarget(cfg)
-	printDemoHeader(target)
-
+	standard, confidential := demoStandardVM, demoConfidentialVM
+	if standard == "" {
+		standard = cfg.VMs.Standard.Name
+	}
+	if confidential == "" {
+		confidential = cfg.VMs.Confidential.Name
+	}
 	if target == "pod" {
-		return runDemoPod(cfg, pattern, patternName, verbose)
-	}
-	return runDemoVM(cfg, pattern, patternName, verbose)
-}
-
-func runDemoVM(cfg *config.Config, pattern, patternName string, verbose bool) error {
-	standardVM := demoStandardVM
-	if standardVM == "" {
-		standardVM = cfg.VMs.Standard.Name
-	}
-
-	confidentialVM := demoConfidentialVM
-	if confidentialVM == "" {
-		confidentialVM = cfg.VMs.Confidential.Name
-	}
-
-	v := virsh.NewLocal(verbose)
-
-	// Step 0: List VMs
-	fmt.Println()
-	color.Cyan("📋 Step 0: Listing VMs on local host")
-	fmt.Println(color.HiBlackString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
-
-	vms, err := v.List()
-	if err != nil {
-		return fmt.Errorf("failed to list VMs: %w", err)
-	}
-
-	for _, vm := range vms {
-		if vm.Name == "neo4j-vm1" || vm.Name == "neo4j-cvm" {
-			fmt.Printf("  ✓ %s (%s)\n", color.CyanString(vm.Name), vm.State)
+		standard, confidential = demoStandardPod, demoConfidentialPod
+		if standard == "" {
+			standard = cfg.Pods.Standard.Ref()
 		}
-	}
-
-	time.Sleep(2 * time.Second)
-
-	// Step 1: Attack standard VM
-	fmt.Println()
-	fmt.Println()
-	color.New(color.FgRed, color.Bold).Printf("🔴 PHASE 1: ATTACKING STANDARD VM (%s)\n", standardVM)
-	fmt.Println(color.HiBlackString("═══════════════════════════════════════════════════"))
-
-	vm1DumpPath := filepath.Join(demoOutputDir, fmt.Sprintf("demo-%s.dump", standardVM))
-	if err := attackVM(v, standardVM, vm1DumpPath, pattern, patternName, false); err != nil {
-		return fmt.Errorf("standard VM attack failed: %w", err)
-	}
-
-	time.Sleep(3 * time.Second)
-
-	// Step 2: Attack confidential VM
-	fmt.Println()
-	fmt.Println()
-	color.New(color.FgGreen, color.Bold).Printf("🔵 PHASE 2: ATTACKING CONFIDENTIAL VM (%s)\n", confidentialVM)
-	fmt.Println(color.HiBlackString("═══════════════════════════════════════════════════"))
-
-	cvmDumpPath := filepath.Join(demoOutputDir, fmt.Sprintf("demo-%s.dump", confidentialVM))
-	if err := attackVM(v, confidentialVM, cvmDumpPath, pattern, patternName, true); err != nil {
-		return fmt.Errorf("confidential VM attack failed: %w", err)
-	}
-
-	time.Sleep(2 * time.Second)
-
-	// Step 3: Show comparison
-	fmt.Println()
-	fmt.Println()
-	color.New(color.FgMagenta, color.Bold).Println("📊 COMPARISON & CONCLUSION")
-	fmt.Println(color.HiBlackString("═══════════════════════════════════════════════════"))
-
-	printComparisonTable()
-
-	// Cleanup
-	if demoCleanup {
-		fmt.Println()
-		color.HiBlack("🧹 Cleaning up dump files...")
-		os.Remove(vm1DumpPath)
-		os.Remove(cvmDumpPath)
-		color.HiBlack("✓ Cleanup complete")
-	}
-
-	// Final message
-	fmt.Println()
-	printDemoFooter()
-
-	return nil
-}
-
-// runDemoPod runs the comparison demo against two pods: a runc pod (standard)
-// and a Kata-SNP pod (confidential). Uses the pod backend; requires crictl +
-// CRI-O socket (i.e. an OpenShift worker node).
-func runDemoPod(cfg *config.Config, pattern, patternName string, verbose bool) error {
-	b := backend.Get("pod", verbose)
-	if b == nil || !b.Available() {
-		return fmt.Errorf("pod backend not available (need crictl + CRI-O on this host — run via `oc debug node/<name>`)")
-	}
-
-	standardPod := demoStandardPod
-	if standardPod == "" {
-		standardPod = cfg.Pods.Standard.Ref()
-	}
-	confidentialPod := demoConfidentialPod
-	if confidentialPod == "" {
-		confidentialPod = cfg.Pods.Confidential.Ref()
-	}
-	if standardPod == "/" || confidentialPod == "/" {
-		return fmt.Errorf("pod demo requires --standard-pod and --confidential-pod (or pods section in .vmgrab.yaml)")
-	}
-
-	// Phase 1: standard pod (runc)
-	fmt.Println()
-	fmt.Println()
-	color.New(color.FgRed, color.Bold).Printf("🔴 PHASE 1: ATTACKING STANDARD POD (%s)\n", standardPod)
-	fmt.Println(color.HiBlackString("═══════════════════════════════════════════════════"))
-
-	runcDump, err := attackPod(b, standardPod, pattern, patternName, false)
-	if err != nil {
-		return fmt.Errorf("standard pod attack failed: %w", err)
-	}
-
-	time.Sleep(3 * time.Second)
-
-	// Phase 2: Kata-SNP pod
-	fmt.Println()
-	fmt.Println()
-	color.New(color.FgGreen, color.Bold).Printf("🔵 PHASE 2: ATTACKING KATA-SNP POD (%s)\n", confidentialPod)
-	fmt.Println(color.HiBlackString("═══════════════════════════════════════════════════"))
-
-	kataDump, err := attackPod(b, confidentialPod, pattern, patternName, true)
-	if err != nil {
-		return fmt.Errorf("kata-snp pod attack failed: %w", err)
-	}
-
-	time.Sleep(2 * time.Second)
-
-	// Comparison
-	fmt.Println()
-	fmt.Println()
-	color.New(color.FgMagenta, color.Bold).Println("📊 COMPARISON & CONCLUSION")
-	fmt.Println(color.HiBlackString("═══════════════════════════════════════════════════"))
-
-	printPodComparisonTable()
-
-	if demoCleanup {
-		fmt.Println()
-		color.HiBlack("🧹 Cleaning up dump files...")
-		if runcDump != "" {
-			os.Remove(runcDump)
+		if confidential == "" {
+			confidential = cfg.Pods.Confidential.Ref()
 		}
-		if kataDump != "" {
-			os.Remove(kataDump)
-		}
-		color.HiBlack("✓ Cleanup complete")
+	} else if target != "vm" {
+		return fmt.Errorf("unknown demo target %q", target)
 	}
-
-	fmt.Println()
-	printDemoFooter()
-	return nil
-}
-
-func attackVM(v *virsh.LocalClient, vmName, dumpPath, pattern, patternName string, isConfidential bool) error {
-	// Step 1: Dump memory
-	fmt.Println()
-	color.Cyan("📍 Step 1: Dumping %s memory", vmName)
-	fmt.Printf("   Target: %s\n", color.HiWhiteString(vmName))
-	fmt.Printf("   Output: %s\n", color.HiBlackString(dumpPath))
-	fmt.Println()
-
-	visualizer.ShowProgressBar("Creating memory dump", 5*time.Second)
-
-	err := v.Dump(vmName, dumpPath)
-	if err != nil {
-		return fmt.Errorf("dump failed: %w", err)
+	if standard == "" || confidential == "" || standard == "/" || confidential == "/" {
+		return fmt.Errorf("both standard and confidential targets are required")
 	}
-
-	size, _ := v.GetFileSize(dumpPath)
-	if size > 0 {
-		color.Green("✅ Dump completed: %s", formatBytes(size))
+	if standard == confidential {
+		return fmt.Errorf("standard and confidential targets must differ")
 	}
-
-	time.Sleep(1 * time.Second)
-
-	// Step 2: Search for sensitive data
-	fmt.Println()
-	color.Cyan("🔍 Step 2: Searching for sensitive data")
-	fmt.Printf("   Pattern: %s (%s)\n", color.YellowString(pattern), color.HiBlackString(patternName))
-	fmt.Println()
-
-	s := search.New(dumpPath, false)
-
-	visualizer.ShowProgressBar("Scanning memory", 3*time.Second)
-
-	matches, err := s.Search(pattern, 5)
-	if err != nil {
-		return fmt.Errorf("search failed: %w", err)
-	}
-
-	// Step 3: Show results
-	fmt.Println()
-	color.Cyan("📊 Step 3: Results")
-	fmt.Println()
-
-	if len(matches) == 0 {
-		color.Green("✅ NO MATCHES FOUND - Memory is ENCRYPTED")
-		if isConfidential {
-			fmt.Println()
-			color.HiBlack("AMD SEV-SNP successfully protected the memory!")
-			color.HiBlack("Attackers cannot read sensitive data even with root access.")
-		} else {
-			color.Yellow("⚠️  Warning: No matches, but this VM should be vulnerable!")
-		}
-	} else {
-		color.Red("❌ VULNERABLE - %d match(es) found!", len(matches))
-		if isConfidential {
-			color.Red("⚠️  ERROR: cVM should be protected but data was found!")
-		} else {
-			fmt.Println()
-			color.HiBlack("This is expected - VM1 has no memory encryption.")
-			color.HiBlack("Attackers can easily extract sensitive data!")
-		}
-
-		// Show first match
-		if len(matches) > 0 {
-			fmt.Println()
-			color.Red("🔍 First match at offset 0x%x:", matches[0].Offset)
-			fmt.Println(color.HiBlackString("─────────────────────────────────────"))
-
-			contextData := s.GetContext(matches[0].Offset, 80)
-			visualizer.ShowMatchContext(contextData, pattern)
-		}
-	}
-
-	return nil
-}
-
-// attackPod mirrors attackVM but routes through a backend.Backend (pod).
-// Returns the actual dump path so the caller can clean up.
-func attackPod(b backend.Backend, target, pattern, patternName string, isConfidential bool) (string, error) {
-	fmt.Println()
-	color.Cyan("📍 Step 1: Dumping %s memory", target)
-	fmt.Printf("   Target: %s\n", color.HiWhiteString(target))
-	fmt.Printf("   Output dir: %s\n", color.HiBlackString(demoOutputDir))
-	fmt.Println()
-
-	visualizer.ShowProgressBar("Creating memory dump", 5*time.Second)
-
-	dumpPath, err := b.Dump(target, demoOutputDir)
-	if err != nil {
-		return "", fmt.Errorf("dump failed: %w", err)
-	}
-
-	size, _ := b.GetFileSize(dumpPath)
-	if size > 0 {
-		color.Green("✅ Dump completed: %s", formatBytes(size))
-	}
-
-	time.Sleep(1 * time.Second)
-
-	fmt.Println()
-	color.Cyan("🔍 Step 2: Searching for sensitive data")
-	fmt.Printf("   Pattern: %s (%s)\n", color.YellowString(pattern), color.HiBlackString(patternName))
-	fmt.Println()
-
-	s := search.New(dumpPath, false)
-	visualizer.ShowProgressBar("Scanning memory", 3*time.Second)
-
-	matches, err := s.Search(pattern, 5)
-	if err != nil {
-		return dumpPath, fmt.Errorf("search failed: %w", err)
-	}
-
-	fmt.Println()
-	color.Cyan("📊 Step 3: Results")
-	fmt.Println()
-
-	if isConfidential {
-		if err := podConfidentialVerdict(s, matches, pattern); err != nil {
-			return dumpPath, err
-		}
-		return dumpPath, nil
-	}
-
-	if len(matches) == 0 {
-		color.Green("✅ NO MATCHES FOUND - Memory is ENCRYPTED")
-		color.Yellow("⚠️  Warning: No matches, but this pod should be vulnerable!")
-	} else {
-		color.Red("❌ VULNERABLE - %d match(es) found!", len(matches))
-		fmt.Println()
-		color.HiBlack("This is expected — runc pods have no memory encryption.")
-		color.HiBlack("Attackers with node access can extract secrets trivially!")
-		fmt.Println()
-		color.Red("🔍 First match at offset 0x%x:", matches[0].Offset)
-		fmt.Println(color.HiBlackString("─────────────────────────────────────"))
-		contextData := s.GetContext(matches[0].Offset, 80)
-		visualizer.ShowMatchContext(contextData, pattern)
-	}
-
-	return dumpPath, nil
-}
-
-// podConfidentialVerdict applies the two-axis verdict for Kata-SNP pods:
-// (1) kernel-fingerprint probe — guest-kernel strings must be invisible if
-// SEV-SNP is encrypting private memory; (2) shared-I/O classification —
-// user-pattern matches inside the kata-agent vsock ring buffer are I/O
-// transit, not private-memory leaks.
-func podConfidentialVerdict(s *search.Searcher, matches []search.Match, pattern string) error {
-	fmt.Println()
-	color.Cyan("🔬 Step 3a: Probing for guest-kernel fingerprints")
-	color.HiBlack("   These strings live in guest kernel .rodata/.text — they MUST")
-	color.HiBlack("   be invisible to host if SEV-SNP is encrypting private memory.")
-	fmt.Println()
-
-	fps, err := s.SearchPatterns(kernelFingerprintPatterns)
-	if err != nil {
-		return fmt.Errorf("kernel-fingerprint probe failed: %w", err)
-	}
-	fpHits := 0
-	for _, r := range fps {
-		if r.Found {
-			fpHits++
-			fmt.Printf("   %-40s %s\n", r.Pattern, color.RedString("✗ FOUND at 0x%x", r.Offset))
-		} else {
-			fmt.Printf("   %-40s %s\n", r.Pattern, color.GreenString("✓ not found"))
-		}
-	}
-
-	realLeaks := 0
-	sharedIO := 0
-	var firstSharedHexPrefix string
-	var firstRealLeakOffset int64
-	for _, m := range matches {
-		isShared, hexPrefix := s.LooksLikeVsockSharedBuffer(m.Offset)
-		if isShared {
-			sharedIO++
-			if firstSharedHexPrefix == "" {
-				firstSharedHexPrefix = hexPrefix
+	var phases [2]demoPhase
+	for i, name := range []string{standard, confidential} {
+		phases[i].Target = name
+		fmt.Printf("\nPHASE %d: %s\n", i+1, name)
+		var b backend.Backend
+		if target == "pod" {
+			b = backend.Get("pod", verbose)
+			if b == nil || !b.Available() {
+				phases[i].Err = fmt.Errorf("pod backend unavailable")
 			}
 		} else {
-			if realLeaks == 0 {
-				firstRealLeakOffset = m.Offset
-			}
-			realLeaks++
+			b, phases[i].Err = targetBackend(name, verbose)
 		}
-	}
-
-	fmt.Println()
-	color.Cyan("📊 Step 3b: Verdict")
-	fmt.Printf("   User-pattern matches: %d total — %d real-leak, %d shared-I/O\n",
-		len(matches), realLeaks, sharedIO)
-	fmt.Printf("   Kernel fingerprints found: %d / %d\n", fpHits, len(kernelFingerprintPatterns))
-	fmt.Println()
-
-	if fpHits == 0 && realLeaks == 0 {
-		color.Green("✅ PROTECTED — guest private memory is encrypted")
-		if sharedIO > 0 {
-			fmt.Println()
-			color.HiBlack("   %d match(es) located in vsock shared ring buffer (kata-agent stdout I/O relay).", sharedIO)
-			color.HiBlack("   This is by-design shared memory, NOT a private-memory leak.")
-			color.HiBlack("   Preceding bytes (virtio-vsock packet header):")
-			for _, line := range strings.Split(strings.TrimRight(firstSharedHexPrefix, "\n"), "\n") {
-				color.HiBlack("     %s", line)
+		if phases[i].Err == nil {
+			path, captureErr := b.Dump(name, demoOutputDir)
+			if demoCleanup {
+				defer cleanupCapture(path)
+			}
+			phases[i].Err = captureErr
+			if path != "" {
+				s := search.New(path, verbose)
+				a, err := s.Analyze(pattern, 5)
+				phases[i].Analysis = a
+				if err != nil {
+					phases[i].Err = err
+				} else {
+					printAnalysis(s, a, 60)
+					if err := a.Check(); err != nil {
+						phases[i].Err = err
+					}
+				}
 			}
 		}
-		return nil
+		if phases[i].Err != nil {
+			fmt.Printf("Phase failed: %v\n", phases[i].Err)
+		}
 	}
-
-	color.Red("❌ VULNERABLE — kernel-fingerprints=%d, real-leaks=%d", fpHits, realLeaks)
-	if realLeaks > 0 {
-		fmt.Println()
-		color.Red("🔍 First real-leak match at offset 0x%x:", firstRealLeakOffset)
-		fmt.Println(color.HiBlackString("─────────────────────────────────────"))
-		contextData := s.GetContext(firstRealLeakOffset, 80)
-		visualizer.ShowMatchContext(contextData, pattern)
+	printComparison(phases)
+	if err := checkDemo(phases[0], phases[1]); err != nil {
+		return err
 	}
+	fmt.Println("PASS: pattern observed in the standard capture and not observed in the confidential capture.")
+	fmt.Println("This comparison describes the captured mappings; it does not attest the guest or prove encryption.")
 	return nil
 }
 
-func printPodComparisonTable() {
-	fmt.Println()
-	fmt.Println(color.HiWhiteString("┌─────────────────────────┬──────────────────┬──────────────────┐"))
-	fmt.Println(color.HiWhiteString("│ Security Feature        │ Pod (runc)       │ Pod (Kata-SNP)   │"))
-	fmt.Println(color.HiWhiteString("├─────────────────────────┼──────────────────┼──────────────────┤"))
+type demoPhase struct {
+	Target   string
+	Analysis *search.Analysis
+	Err      error
+}
 
-	padColored := func(text string, width int) string {
-		visualLen := len(stripAnsi(text))
-		padding := width - visualLen
-		if padding < 0 {
-			padding = 0
+func printComparison(phases [2]demoPhase) {
+	fmt.Println("\nTarget | Pattern result | Configured CC | Capture")
+	for _, p := range phases {
+		status, security, coverage := "ERROR", "not recorded", "unknown"
+		if a := p.Analysis; a != nil {
+			status = a.Status()
+			if a.Meta != nil {
+				if a.Meta.Security != "" {
+					security = a.Meta.Security
+				}
+				if a.Meta.Capture != nil {
+					coverage = fmt.Sprintf("selected mappings complete=%v", a.Meta.Capture.Complete)
+				}
+			}
+			if len(a.Incomplete) > 0 {
+				coverage = "INCOMPLETE"
+			}
 		}
-		return text + strings.Repeat(" ", padding)
-	}
-
-	fmt.Printf("│ Memory isolation        │ %s │ %s │\n",
-		padColored(color.RedString("✗ None"), 16),
-		padColored(color.GreenString("✓ VM sandbox"), 16))
-	fmt.Printf("│ Memory Encryption       │ %s │ %s │\n",
-		padColored(color.RedString("✗ No"), 16),
-		padColored(color.GreenString("✓ SEV-SNP"), 16))
-	fmt.Printf("│ Host-root can read RAM  │ %s │ %s │\n",
-		padColored(color.RedString("✓ Yes"), 16),
-		padColored(color.GreenString("✗ Ciphertext"), 16))
-
-	fmt.Println(color.HiWhiteString("├─────────────────────────┼──────────────────┼──────────────────┤"))
-
-	fmt.Printf("│ Attack Result           │ %s │ %s │\n",
-		padColored(color.RedString("❌ VULNERABLE"), 16),
-		padColored(color.GreenString("✅ PROTECTED"), 16))
-
-	fmt.Println(color.HiWhiteString("└─────────────────────────┴──────────────────┴──────────────────┘"))
-	fmt.Println()
-}
-
-func printDemoHeader(target string) {
-	cyan := color.New(color.FgCyan, color.Bold)
-
-	fmt.Println()
-	cyan.Println("╔═══════════════════════════════════════════════════════════════════╗")
-	cyan.Println("║                                                                   ║")
-	cyan.Println("║     🔒  CONFIDENTIAL COMPUTING ATTACK DEMONSTRATION  🔒           ║")
-	cyan.Println("║                                                                   ║")
-	cyan.Println("║            Proving AMD SEV-SNP Memory Protection                  ║")
-	cyan.Println("║                                                                   ║")
-	cyan.Println("╚═══════════════════════════════════════════════════════════════════╝")
-	fmt.Println()
-
-	fmt.Println(color.HiBlackString("This demonstration will:"))
-	if target == "pod" {
-		fmt.Println(color.HiBlackString("  1. Attack a STANDARD POD (runc, no encryption) → Data exposed ❌"))
-		fmt.Println(color.HiBlackString("  2. Attack a KATA-SNP POD (SEV-SNP sandbox) → Data protected ✅"))
-		fmt.Println(color.HiBlackString("  3. Compare results and prove encryption works"))
-		fmt.Println()
-		color.Yellow("⚠️  Attack scenario: Root access to the OpenShift worker node")
-	} else {
-		fmt.Println(color.HiBlackString("  1. Attack a STANDARD VM (no encryption) → Data exposed ❌"))
-		fmt.Println(color.HiBlackString("  2. Attack a CONFIDENTIAL VM (SEV-SNP) → Data protected ✅"))
-		fmt.Println(color.HiBlackString("  3. Compare results and prove encryption works"))
-		fmt.Println()
-		color.Yellow("⚠️  Both VMs run identical Neo4j databases with NHS numbers")
-		color.Yellow("⚠️  Attack scenario: Root access to KVM host server")
-	}
-	fmt.Println()
-
-	time.Sleep(2 * time.Second)
-}
-
-func printComparisonTable() {
-	fmt.Println()
-	// Box drawing characters
-	fmt.Println(color.HiWhiteString("┌─────────────────────────┬──────────────────┬──────────────────┐"))
-	fmt.Println(color.HiWhiteString("│ Security Feature        │ VM1 (Standard)   │ cVM (Protected)  │"))
-	fmt.Println(color.HiWhiteString("├─────────────────────────┼──────────────────┼──────────────────┤"))
-
-	padColored := func(text string, width int) string {
-		visualLen := len(stripAnsi(text))
-		padding := width - visualLen
-		if padding < 0 {
-			padding = 0
+		if p.Err != nil {
+			coverage = "ERROR/INCOMPLETE"
 		}
-		return text + strings.Repeat(" ", padding)
+		fmt.Printf("%s | %s | %s | %s\n", p.Target, status, security, coverage)
 	}
-
-	// TLS row
-	fmt.Printf("│ TLS Encryption          │ %s │ %s │\n",
-		padColored(color.GreenString("✓ Yes"), 16),
-		padColored(color.GreenString("✓ Yes"), 16))
-
-	// Memory row
-	fmt.Printf("│ Memory Encryption       │ %s │ %s │\n",
-		padColored(color.RedString("✗ No"), 16),
-		padColored(color.GreenString("✓ SEV-SNP"), 16))
-
-	// Disk row
-	fmt.Printf("│ Disk Encryption         │ %s │ %s │\n",
-		padColored(color.RedString("✗ No"), 16),
-		padColored(color.GreenString("✓ LUKS"), 16))
-
-	fmt.Println(color.HiWhiteString("├─────────────────────────┼──────────────────┼──────────────────┤"))
-
-	// Result row
-	fmt.Printf("│ Attack Result           │ %s │ %s │\n",
-		padColored(color.RedString("❌ VULNERABLE"), 16),
-		padColored(color.GreenString("✅ PROTECTED"), 16))
-
-	fmt.Println(color.HiWhiteString("└─────────────────────────┴──────────────────┴──────────────────┘"))
-	fmt.Println()
 }
 
-// stripAnsi removes ANSI color codes to calculate visual length
-func stripAnsi(s string) string {
-	result := ""
-	inEscape := false
-	for _, c := range s {
-		if c == '\033' {
-			inEscape = true
-		} else if inEscape && c == 'm' {
-			inEscape = false
-		} else if !inEscape {
-			result += string(c)
+func checkDemo(standard, confidential demoPhase) error {
+	for _, p := range []demoPhase{standard, confidential} {
+		if p.Err != nil {
+			return fmt.Errorf("demo incomplete for %s: %w", p.Target, p.Err)
+		}
+		if p.Analysis == nil {
+			return fmt.Errorf("demo has no result for %s", p.Target)
+		}
+		if err := p.Analysis.Check(); err != nil {
+			return err
 		}
 	}
-	return result
-}
-
-func printDemoFooter() {
-	color.New(color.FgGreen, color.Bold).Println("╔═══════════════════════════════════════════════════════════════════╗")
-	color.Green("║                                                                   ║")
-	color.Green("║                    ✅  DEMO COMPLETED  ✅                          ║")
-	color.Green("║                                                                   ║")
-	color.Green("╚═══════════════════════════════════════════════════════════════════╝")
-	fmt.Println()
-
-	color.Cyan("🎯 Key Takeaways:")
-	fmt.Println(color.HiBlackString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
-	fmt.Println()
-	fmt.Println("  1. " + color.RedString("Traditional VMs") + " are " + color.RedString("vulnerable") + " to memory dump attacks")
-	fmt.Println("     → Even with TLS, attackers with host access can read memory")
-	fmt.Println()
-	fmt.Println("  2. " + color.GreenString("Confidential VMs (AMD SEV-SNP)") + " " + color.GreenString("protect") + " memory")
-	fmt.Println("     → Encrypted memory prevents attackers from reading sensitive data")
-	fmt.Println()
-	fmt.Println("  3. " + color.CyanString("3D Encryption") + " = TLS + Memory + Disk encryption")
-	fmt.Println("     → Complete data protection in cloud environments")
-	fmt.Println()
-
-	color.Magenta("🔗 Learn more: https://enclaive.cloud")
-	fmt.Println()
-}
-
-// getConfig loads configuration (helper function)
-func getConfig(cmd *cobra.Command) (*config.Config, error) {
-	return config.Load("")
+	if len(standard.Analysis.Scan.Matches) == 0 {
+		return fmt.Errorf("demo invalid: positive control did not find the pattern in the standard capture")
+	}
+	if standard.Analysis.Meta != nil && standard.Analysis.Meta.Security != "" {
+		return fmt.Errorf("demo invalid: standard target has confidential computing configured")
+	}
+	if len(confidential.Analysis.Scan.Matches) > 0 {
+		return fmt.Errorf("demo expectation failed: requested data is readable in the confidential capture; this alone does not identify a private-memory leak")
+	}
+	if confidential.Analysis.Meta == nil || confidential.Analysis.Meta.Security == "" {
+		return fmt.Errorf("demo inconclusive: confidential computing was not recorded for the confidential target")
+	}
+	if confidential.Analysis.Meta.Capture == nil {
+		return fmt.Errorf("demo inconclusive: confidential capture coverage was not recorded")
+	}
+	return nil
 }

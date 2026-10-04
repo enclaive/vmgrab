@@ -37,72 +37,10 @@ func New(filePath string, verbose bool) *Searcher {
 	}
 }
 
-// Search finds all occurrences of pattern in the dump file
+// Search returns up to maxMatches matches with file-relative offsets.
 func (s *Searcher) Search(pattern string, maxMatches int) ([]Match, error) {
-	// Validate regex pattern before compiling
-	_, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("invalid regex pattern: %w", err)
-	}
-
-	file, err := os.Open(s.FilePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	var matches []Match
-	re := regexp.MustCompile(pattern)
-
-	// Read file in chunks
-	const chunkSize = 1024 * 1024 // 1MB chunks
-	buffer := make([]byte, chunkSize)
-	overlap := make([]byte, 0)
-	offset := int64(0)
-
-	for {
-		n, err := file.Read(buffer)
-		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("read error: %w", err)
-		}
-		if n == 0 {
-			break
-		}
-
-		// Combine overlap from previous chunk with current chunk
-		searchData := append(overlap, buffer[:n]...)
-
-		// Find all matches in this chunk
-		indices := re.FindAllIndex(searchData, -1)
-		for _, idx := range indices {
-			matchOffset := offset - int64(len(overlap)) + int64(idx[0])
-			matchData := searchData[idx[0]:idx[1]]
-
-			matches = append(matches, Match{
-				Offset: matchOffset,
-				Data:   matchData,
-			})
-
-			if len(matches) >= maxMatches {
-				return matches, nil
-			}
-		}
-
-		// Keep last 8KB as overlap for next chunk (in case match spans chunks)
-		// Increased from 1KB to 8KB to prevent missing matches at chunk boundaries
-		overlapSize := 8192
-		if n < overlapSize {
-			overlapSize = n
-		}
-		overlap = buffer[n-overlapSize : n]
-		offset += int64(n)
-
-		if err == io.EOF {
-			break
-		}
-	}
-
-	return matches, nil
+	result, err := s.Scan(pattern, maxMatches)
+	return result.Matches, err
 }
 
 // GetContext retrieves n bytes before the given offset (legacy, for compatibility)
@@ -213,8 +151,8 @@ func (s *Searcher) GetRandomSnippets(count, size int) ([]Snippet, error) {
 	var snippets []Snippet
 
 	// Sample from middle 80% of file (skip first/last 10% where QEMU structures live)
-	startRange := fileSize / 10         // 10% from start
-	endRange := fileSize - fileSize/10  // 10% from end
+	startRange := fileSize / 10        // 10% from start
+	endRange := fileSize - fileSize/10 // 10% from end
 	rangeSize := endRange - startRange
 
 	if rangeSize < int64(size*count) {
@@ -490,8 +428,8 @@ type DumpClassification struct {
 	// extend past the end of the file. That means the dump was cut short,
 	// which is exactly what a dump interrupted mid-write looks like, and any
 	// "not found" result on such a file is unreliable.
-	Truncated        bool
-	DeclaredBytes    int64 // highest end offset declared by the program headers
+	Truncated     bool
+	DeclaredBytes int64 // highest end offset declared by the program headers
 }
 
 // Thresholds for ClassifyDump. Tuned against real dumps:

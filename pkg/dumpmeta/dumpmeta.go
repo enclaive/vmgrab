@@ -18,21 +18,36 @@ import (
 //
 // v1 (initial): single-process dumps, Meta.PID identifies the dumped process.
 // v2: multi-container pod dumps. Containers describes the byte slice each
-//     container's memory occupies in the dump file.
+//
+//	container's memory occupies in the dump file.
+//
 // v3: per-process layout inside each container. ContainerDump.Processes
-//     enumerates every PID in the container's process tree (entrypoint +
-//     descendants). crictl's container.info.pid is often a wrapper script
-//     (e.g. docker-entrypoint.py spawning mongod); dumping only the wrapper
-//     misses the service's address space entirely. Each ProcessDump records
-//     its own byte slice and per-region layout.
-const SchemaVersion = 3
+//
+//	enumerates every PID in the container's process tree (entrypoint +
+//	descendants). crictl's container.info.pid is often a wrapper script
+//	(e.g. docker-entrypoint.py spawning mongod); dumping only the wrapper
+//	misses the service's address space entirely. Each ProcessDump records
+//	its own byte slice and per-region layout.
+const SchemaVersion = 4
 
 // Suffix is appended to the dump file path to form the sidecar path.
 const Suffix = ".meta.json"
 
 // Meta describes how a dump was produced. Fields with unknown values are left
 // empty rather than guessed; consumers must treat empty fields as "unknown".
+// v4 adds capture coverage, guest_memfd observation and per-region read errors.
+type Capture struct {
+	Scope       string   `json:"scope"`
+	Complete    bool     `json:"complete"`
+	BytesRead   int64    `json:"bytesRead"`
+	BytesPadded int64    `json:"bytesPadded"`
+	GuestMemfd  *bool    `json:"guestMemfd,omitempty"`
+	Errors      []string `json:"errors,omitempty"`
+}
+
 type Meta struct {
+	Capture *Capture `json:"capture,omitempty"`
+
 	Version    int             `json:"version"`
 	Backend    string          `json:"backend"`            // "pod", "procmem", "libvirt", "qemu"
 	Kind       string          `json:"kind,omitempty"`     // "pod-runc", "pod-kata", "" for VMs
@@ -51,6 +66,7 @@ type Meta struct {
 // attribute a match at dump-offset X back to a specific container, process,
 // and VMA without re-deriving from raw bytes.
 type ContainerDump struct {
+	ID        string        `json:"id,omitempty"`
 	Name      string        `json:"name"`      // CRI container name (e.g. "mongodb", "linkerd-proxy")
 	PID       int           `json:"pid"`       // entrypoint host PID (crictl inspect .info.pid)
 	ByteStart int64         `json:"byteStart"` // first byte of this container's memory in the dump file
@@ -62,6 +78,7 @@ type ContainerDump struct {
 // /proc/PID/comm at capture time (truncated to 16 chars by the kernel) — used
 // only for human-readable verdicts, never as an identifier.
 type ProcessDump struct {
+	StartTime uint64       `json:"startTime,omitempty"`
 	PID       int          `json:"pid"`
 	Comm      string       `json:"comm,omitempty"`
 	ByteStart int64        `json:"byteStart"`
@@ -74,6 +91,10 @@ type ProcessDump struct {
 // the corresponding offsets inside the dump file (relative to file start, not
 // to the process's slice).
 type RegionDump struct {
+	Path      string `json:"path,omitempty"`
+	BytesRead int64  `json:"bytesRead"`
+	Error     string `json:"error,omitempty"`
+
 	Start     uint64 `json:"start"`     // process VA: first byte of region
 	End       uint64 `json:"end"`       // process VA: first byte AFTER region
 	Perms     string `json:"perms"`     // /proc/PID/maps perms column (e.g. "rw-p")
@@ -141,7 +162,12 @@ func WriteVM(dumpPath, backendName, target string, pid int, security string) err
 	if fi, err := os.Stat(dumpPath); err == nil {
 		size = fi.Size()
 	}
+	scope := "memory returned by the " + backendName + " capture command"
+	if backendName == "procmem" {
+		scope = "largest readable-writable non-device QEMU mapping (heuristic selection)"
+	}
 	m := &Meta{
+		Capture:   &Capture{Scope: scope, Complete: size > 0, BytesRead: size},
 		Backend:   backendName,
 		Target:    target,
 		PID:       pid,

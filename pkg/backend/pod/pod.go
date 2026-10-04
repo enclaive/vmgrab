@@ -1,309 +1,263 @@
-// Package pod implements a vmgrab backend that discovers Kubernetes pods
-// via CRI-O (crictl) and dumps their memory by reusing the procmem backend.
-//
-// Two pod kinds are supported:
-//
-//   - pod-runc: the container's main host process is dumped directly. The PID
-//     comes from `crictl inspect <container> -o json` -> .info.pid.
-//   - pod-kata: the QEMU sandbox backing the pod is dumped. The sandbox id
-//     comes from `crictl inspectp <pod> -o json` and is resolved to a QEMU
-//     PID via /proc/*/cmdline scan. This yields the same ciphertext view
-//     that procmem already produces for confidential-computing VMs.
-//
-// This backend is only Available() on an OpenShift / CRI-O worker node; on
-// any other host it self-disables so existing VM-dump flows are unaffected.
+// Package pod discovers CRI sandboxes and captures host-readable process
+// mappings. QEMU userspace memory is not equivalent to private guest memory.
 package pod
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
-	"time"
 
 	"github.com/enclaive/vmgrab/pkg/backend"
 	"github.com/enclaive/vmgrab/pkg/backend/procmem"
+	"github.com/enclaive/vmgrab/pkg/dumpmeta"
 )
 
-func init() {
-	backend.Register("pod", func(verbose bool) backend.Backend {
-		return New(verbose)
-	})
+func init() { backend.Register("pod", func(verbose bool) backend.Backend { return New(verbose) }) }
+
+type memorySource interface {
+	ParseMemoryMaps(int) ([]procmem.MemoryRegion, error)
+	StreamMemoryRegion(int, *procmem.MemoryRegion, io.Writer) (int64, error)
+	DetectSecurity(int) string
+	GetFileSize(string) (int64, error)
 }
 
-// Backend discovers pods via crictl and dumps their memory via procmem.
 type Backend struct {
-	Verbose bool
-	// procmem is reused verbatim — parse maps + dd /proc/pid/mem. Keeping it
-	// as a field (vs. a fresh call each time) preserves its Verbose setting.
-	procmem *procmem.Backend
+	Verbose  bool
+	procmem  memorySource
+	procRoot string
 }
 
-// New creates a pod backend.
 func New(verbose bool) *Backend {
-	return &Backend{
-		Verbose: verbose,
-		procmem: procmem.New(verbose),
-	}
+	return &Backend{Verbose: verbose, procmem: procmem.New(verbose), procRoot: "/proc"}
 }
-
-// Name returns the backend name.
 func (b *Backend) Name() string { return "pod" }
-
-// Available reports whether this host has a usable CRI socket reachable
-// via crictl. We probe by running `crictl info` — the universal check that
-// succeeds on both CRI-O (OpenShift) and containerd (vanilla k8s / GKE /
-// EKS) without us needing to hardcode a runtime or a socket path. Any
-// non-zero exit (no binary, no config, no reachable socket) disables the
-// backend cleanly.
 func (b *Backend) Available() bool {
 	if _, err := exec.LookPath("crictl"); err != nil {
 		return false
 	}
-	if err := exec.Command("crictl", "info").Run(); err != nil {
-		return false
-	}
-	return true
+	return exec.Command("crictl", "info").Run() == nil
 }
 
-// List enumerates ready pods and classifies each as pod-runc or pod-kata.
-// We inspect every sandbox individually because `crictl pods -o json` on
-// CRI-O (OCP) leaves the top-level runtimeHandler empty — the real value
-// lives in inspectp output.
 func (b *Backend) List() ([]backend.VM, error) {
 	pods, err := listPods()
 	if err != nil {
 		return nil, err
 	}
-
-	var out []backend.VM
+	inv := inventory(b.procRoot)
+	var result []backend.VM
 	for _, p := range pods {
+		vm := backend.VM{Name: p.Metadata.Name, Namespace: p.Metadata.Namespace, State: "running"}
 		pi, err := inspectPod(p.ID)
+		if err == nil {
+			vm.Kind, vm.PID, err = b.classify(p, pi, inv)
+		}
 		if err != nil {
-			if b.Verbose {
-				fmt.Printf("→ skip %s/%s: inspectp: %v\n", p.Metadata.Namespace, p.Metadata.Name, err)
-			}
-			continue
+			vm.Kind = "pod-unknown"
+			vm.State = "unresolved"
+			fmt.Fprintf(os.Stderr, "Warning: %s/%s: %v\n", vm.Namespace, vm.Name, err)
+		} else if vm.Kind == "pod-kata" {
+			vm.Security = b.procmem.DetectSecurity(vm.PID)
 		}
-
-		kind := "pod-runc"
-		if isKataHandler(pi.runtimeHandler()) {
-			kind = "pod-kata"
-		}
-
-		pid, security, err := b.resolvePIDAndSecurity(p.ID, kind, pi)
-		if err != nil {
-			if b.Verbose {
-				fmt.Printf("→ skip %s/%s: %v\n", p.Metadata.Namespace, p.Metadata.Name, err)
-			}
-			continue
-		}
-
-		out = append(out, backend.VM{
-			Name:      p.Metadata.Name,
-			Namespace: p.Metadata.Namespace,
-			PID:       pid,
-			State:     "running",
-			Security:  security,
-			Kind:      kind,
-		})
+		result = append(result, vm)
 	}
-	return out, nil
+	return result, nil
 }
 
-// resolvePIDAndSecurity finds the host PID to dump and its security label.
-// For runc pods, PID is the main container process and security is always "".
-// For Kata pods, PID is the QEMU sandbox process and security is derived from
-// its QEMU cmdline — the same regex procmem uses for VMs.
-func (b *Backend) resolvePIDAndSecurity(podID, kind string, pi *podInspect) (int, string, error) {
-	switch kind {
-	case "pod-kata":
-		// Primary: trust inspectp.info.pid if it's actually a QEMU process.
-		// On OCP + Enclaive Kata (CRI-O 1.33, RHCOS 9.6) this is already the
-		// qemu-kvm PID. On other Kata flavors info.pid may point at the shim
-		// — fall through to the /proc scan in that case.
-		if pi.Info.PID > 0 {
-			if isQEMUCmdline(readProcCmdline(pi.Info.PID)) {
-				return pi.Info.PID, b.procmem.DetectSecurity(pi.Info.PID), nil
-			}
+func selectPod(pods []podListItem, target string) (*podListItem, error) {
+	var found *podListItem
+	for i := range pods {
+		p := &pods[i]
+		if target != p.Metadata.Name && target != p.Metadata.Namespace+"/"+p.Metadata.Name {
+			continue
 		}
-		// Fallback: scan /proc for qemu-(system|kvm) whose cmdline contains
-		// the sandbox hint (Kata sandbox_id if set, else CRI pod ID).
-		hint := pi.sandboxHint(podID)
-		pid, err := resolveKataQEMUPID(hint)
-		if err != nil {
-			return 0, "", err
+		if found != nil {
+			return nil, fmt.Errorf("ambiguous pod %q; use namespace/name", target)
 		}
-		return pid, b.procmem.DetectSecurity(pid), nil
-
-	default: // pod-runc
-		first, running, err := firstRunningContainer(podID)
-		if err != nil {
-			return 0, "", err
-		}
-		if first == nil {
-			return 0, "", fmt.Errorf("no running container in pod %s", podID)
-		}
-		if running > 1 && b.Verbose {
-			fmt.Printf("→ pod %s has %d running containers; dumping first (%s)\n",
-				podID, running, first.Metadata.Name)
-		}
-		pid, err := containerPID(first.ID)
-		if err != nil {
-			return 0, "", err
-		}
-		return pid, "", nil
+		found = p
 	}
+	if found == nil {
+		return nil, fmt.Errorf("pod not found: %s", target)
+	}
+	return found, nil
 }
 
-// Dump creates a memory dump for the named pod. Accepts either "pod-name" or
-// "namespace/pod-name". The heavy lifting (parse maps, chunked /proc/pid/mem
-// read) is delegated to procmem unchanged.
+// Dump resolves only the requested sandbox, then snapshots the selected
+// processes and mappings. A changing live workload is not an atomic snapshot.
+// Partial artifacts retain metadata and return BOTH their path and an error.
 func (b *Backend) Dump(target, outputDir string) (string, error) {
-	vms, err := b.List()
+	pods, err := listPods()
 	if err != nil {
 		return "", err
 	}
-
-	vm := findByNsName(vms, target)
-	if vm == nil {
-		return "", fmt.Errorf("pod not found: %s", target)
-	}
-
-	if b.Verbose {
-		fmt.Printf("→ Dumping %s/%s (kind=%s, pid=%d)\n",
-			vm.Namespace, vm.Name, vm.Kind, vm.PID)
-	}
-
-	regions, err := b.procmem.ParseMemoryMaps(vm.PID)
+	pod, err := selectPod(pods, target)
 	if err != nil {
-		return "", fmt.Errorf("parse maps for pid %d: %w", vm.PID, err)
+		return "", err
 	}
-	if len(regions) == 0 {
-		return "", fmt.Errorf("no memory regions for pid %d", vm.PID)
+	pi, err := inspectPod(pod.ID)
+	if err != nil {
+		return "", err
 	}
-
-	timestamp := time.Now().Format("20060102-150405")
-	base := fmt.Sprintf("%s-%s-%s.dump", vm.Namespace, vm.Name, timestamp)
-	outputPath := filepath.Join(outputDir, base)
-
-	switch vm.Kind {
-	case "pod-kata":
-		// Kata sandbox == QEMU: the largest rw- region is guest RAM. Same
-		// selection policy as procmem.Backend.Dump — one pass, one region.
-		r := largestRW(regions)
-		if r == nil {
-			return "", fmt.Errorf("no rw- region for kata sandbox pid %d", vm.PID)
+	kind, pid, err := b.classify(*pod, pi, inventory(b.procRoot))
+	if err != nil {
+		return "", err
+	}
+	out, err := os.CreateTemp(outputDir, pod.Metadata.Namespace+"-"+pod.Metadata.Name+"-*.dump")
+	if err != nil {
+		return "", err
+	}
+	path := out.Name()
+	capture := &dumpmeta.Capture{Scope: "readable non-device mappings of the selected live container processes", Complete: true}
+	meta := &dumpmeta.Meta{Backend: "pod", Kind: kind, Target: pod.Metadata.Namespace + "/" + pod.Metadata.Name, Capture: capture}
+	var captureErr error
+	if kind == "pod-kata" {
+		meta.PID = pid
+		meta.Security = b.procmem.DetectSecurity(pid)
+		capture.Scope = "readable non-device QEMU userspace mappings; guest-private memory is not acquired through guest_memfd"
+		detected, detectErr := procmem.DetectGuestMemfd(b.procRoot, pid)
+		if detectErr != nil {
+			capture.Errors = append(capture.Errors, detectErr.Error())
+			capture.Complete = false
+		} else {
+			capture.GuestMemfd = &detected
 		}
-		if err := b.procmem.DumpMemoryRegion(vm.PID, r, outputPath); err != nil {
-			return "", err
-		}
-	default: // pod-runc
-		// runc containers have no single "guest RAM" region; walk every rw-
-		// region and concatenate. DumpMemoryRegion creates the file; for
-		// subsequent regions we append via a temp per-region file + cat. To
-		// keep the diff minimal we emit one region at a time and append by
-		// reopening in WRONLY|APPEND.
-		if err := dumpAllRW(b.procmem, vm.PID, regions, outputPath); err != nil {
-			return "", err
+		pd, err := b.dumpProcess(pid, out, 0, capture)
+		captureErr = err
+		meta.Containers = []dumpmeta.ContainerDump{{Name: "sandbox", ID: pod.ID, PID: pid, ByteStart: 0, ByteEnd: pd.ByteEnd, Processes: []dumpmeta.ProcessDump{pd}}}
+	} else {
+		containers, err := allRunningContainers(pod.ID)
+		if err != nil {
+			captureErr = err
+		} else {
+			meta.Containers, captureErr = b.dumpContainers(containers, out, capture)
 		}
 	}
-	return outputPath, nil
+	if captureErr != nil {
+		capture.Complete = false
+		capture.Errors = append(capture.Errors, captureErr.Error())
+	}
+	if err := out.Close(); err != nil {
+		capture.Complete = false
+		capture.Errors = append(capture.Errors, err.Error())
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return path, err
+	}
+	meta.Size = info.Size()
+	if capture.BytesRead == 0 {
+		capture.Complete = false
+		capture.Errors = append(capture.Errors, "no memory bytes were read")
+	}
+	if err := meta.Write(path); err != nil {
+		return path, err
+	}
+	if !capture.Complete {
+		return path, fmt.Errorf("incomplete capture saved to %s: %s", path, strings.Join(capture.Errors, "; "))
+	}
+	return path, nil
 }
 
-// GetFileSize delegates to procmem (identical implementation — stat + sudo fallback).
-func (b *Backend) GetFileSize(path string) (int64, error) {
-	return b.procmem.GetFileSize(path)
-}
-
-// findByNsName matches either "pod-name" (unique by name) or "namespace/pod-name".
-func findByNsName(vms []backend.VM, target string) *backend.VM {
-	nsName := strings.Contains(target, "/")
-	for i := range vms {
-		if nsName {
-			if vms[i].Namespace+"/"+vms[i].Name == target {
-				return &vms[i]
-			}
-		} else if vms[i].Name == target {
-			return &vms[i]
-		}
-	}
-	return nil
-}
-
-// largestRW returns the largest rw- (rw-p or rw-s) region, or nil.
-func largestRW(regions []procmem.MemoryRegion) *procmem.MemoryRegion {
-	var best *procmem.MemoryRegion
-	for i := range regions {
-		if !strings.HasPrefix(regions[i].Perms, "rw-") {
+func (b *Backend) dumpContainers(containers []containerItem, out *os.File, capture *dumpmeta.Capture) ([]dumpmeta.ContainerDump, error) {
+	sort.Slice(containers, func(i, j int) bool { return containers[i].Metadata.Name < containers[j].Metadata.Name })
+	var result []dumpmeta.ContainerDump
+	var cursor int64
+	for _, c := range containers {
+		root, err := containerPID(c.ID)
+		if err != nil {
+			capture.Complete = false
+			capture.Errors = append(capture.Errors, err.Error())
 			continue
 		}
-		if best == nil || regions[i].Size > best.Size {
-			best = &regions[i]
-		}
-	}
-	return best
-}
-
-// dumpAllRW dumps every rw- region of pid into outputPath as a concatenation.
-// procmem.DumpMemoryRegion writes to the path it receives with os.Create —
-// we reuse it for the first region, then append subsequent regions via a
-// tempfile + plain append. This keeps procmem untouched.
-func dumpAllRW(pm *procmem.Backend, pid int, regions []procmem.MemoryRegion, outputPath string) error {
-	var rws []procmem.MemoryRegion
-	for _, r := range regions {
-		if strings.HasPrefix(r.Perms, "rw-") {
-			rws = append(rws, r)
-		}
-	}
-	if len(rws) == 0 {
-		return fmt.Errorf("no rw- regions for pid %d", pid)
-	}
-
-	// First region: let procmem create the file.
-	if err := pm.DumpMemoryRegion(pid, &rws[0], outputPath); err != nil {
-		return err
-	}
-	if len(rws) == 1 {
-		return nil
-	}
-
-	// Subsequent regions: dump each to a temp file, then append.
-	out, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	for i := 1; i < len(rws); i++ {
-		tmp, err := os.CreateTemp(filepath.Dir(outputPath), ".vmgrab-region-*")
+		pids, err := containerPIDs(b.procRoot, c.ID, root)
 		if err != nil {
-			return err
+			capture.Complete = false
+			capture.Errors = append(capture.Errors, err.Error())
+			continue
 		}
-		tmpPath := tmp.Name()
-		tmp.Close()
-
-		if err := pm.DumpMemoryRegion(pid, &rws[i], tmpPath); err != nil {
-			os.Remove(tmpPath)
-			return err
+		cd := dumpmeta.ContainerDump{Name: c.Metadata.Name, ID: c.ID, PID: root, ByteStart: cursor}
+		if b.Verbose {
+			fmt.Printf("Container %s: capturing %d processes from its cgroup\n", c.Metadata.Name, len(pids))
 		}
-		if err := appendFile(out, tmpPath); err != nil {
-			os.Remove(tmpPath)
-			return err
+		for _, pid := range pids {
+			// Revalidate membership before reading. Do not follow a reused/moved PID.
+			if _, err := containerCgroup(b.procRoot, c.ID, pid); err != nil {
+				capture.Complete = false
+				capture.Errors = append(capture.Errors, err.Error())
+				continue
+			}
+			pd, err := b.dumpProcess(pid, out, cursor, capture)
+			cursor = pd.ByteEnd
+			cd.Processes = append(cd.Processes, pd)
+			if err != nil {
+				cd.ByteEnd = cursor
+				return append(result, cd), err
+			}
 		}
-		os.Remove(tmpPath)
+		cd.ByteEnd = cursor
+		result = append(result, cd)
 	}
-	return nil
+	return result, nil
 }
 
-func appendFile(dst *os.File, srcPath string) error {
-	src, err := os.Open(srcPath)
+func (b *Backend) dumpProcess(pid int, out *os.File, start int64, capture *dumpmeta.Capture) (dumpmeta.ProcessDump, error) {
+	pd := dumpmeta.ProcessDump{PID: pid, ByteStart: start, ByteEnd: start}
+	before, err := processStartTime(b.procRoot, pid)
 	if err != nil {
-		return err
+		capture.Complete = false
+		capture.Errors = append(capture.Errors, fmt.Sprintf("pid %d: %v", pid, err))
+		return pd, nil
 	}
-	defer src.Close()
-	_, err = io.Copy(dst, src)
-	return err
+	pd.StartTime = before
+	if comm, err := os.ReadFile(filepath.Join(b.procRoot, fmt.Sprint(pid), "comm")); err == nil {
+		pd.Comm = strings.TrimSpace(string(comm))
+	}
+	regions, err := b.procmem.ParseMemoryMaps(pid)
+	if err != nil {
+		capture.Complete = false
+		capture.Errors = append(capture.Errors, err.Error())
+		return pd, nil
+	}
+	sort.Slice(regions, func(i, j int) bool { return regions[i].Start < regions[j].Start })
+	for _, r := range regions {
+		if !procmem.CapturableRegion(r) {
+			continue
+		}
+		rg := dumpmeta.RegionDump{Start: r.Start, End: r.End, Perms: r.Perms, Path: r.Path, ByteStart: pd.ByteEnd}
+		n, err := b.procmem.StreamMemoryRegion(pid, &r, out)
+		pd.ByteEnd += n
+		rg.ByteEnd = pd.ByteEnd
+		rg.BytesRead = n
+		if err != nil {
+			capture.Complete = false
+			rg.Error = err.Error()
+			capture.Errors = append(capture.Errors, fmt.Sprintf("pid %d region 0x%x: %v", pid, r.Start, err))
+			var partial *procmem.PartialReadError
+			if !errors.As(err, &partial) {
+				capture.BytesRead += n
+				pd.Regions = append(pd.Regions, rg)
+				return pd, err
+			}
+			rg.BytesRead = partial.Read
+			capture.BytesPadded += n - partial.Read
+		}
+		capture.BytesRead += rg.BytesRead
+		pd.Regions = append(pd.Regions, rg)
+	}
+	after, err := processStartTime(b.procRoot, pid)
+	if err != nil || before != after {
+		capture.Complete = false
+		capture.Errors = append(capture.Errors, fmt.Sprintf("pid %d exited or changed identity during capture", pid))
+	}
+	if len(pd.Regions) == 0 {
+		capture.Complete = false
+		capture.Errors = append(capture.Errors, fmt.Sprintf("pid %d has no selected readable mappings", pid))
+	}
+	return pd, nil
 }
+
+func (b *Backend) GetFileSize(path string) (int64, error) { return b.procmem.GetFileSize(path) }

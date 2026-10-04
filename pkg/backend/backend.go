@@ -108,7 +108,11 @@ func ListAll(verbose bool) ([]VM, error) {
 
 		for _, vm := range vms {
 			if vm.PID == 0 {
-				continue // skip VMs without PID
+				if vm.Kind == "pod-unknown" {
+					vm.Backend = name
+					allVMs = append(allVMs, vm)
+				}
+				continue
 			}
 			if !seen[vm.PID] {
 				seen[vm.PID] = true

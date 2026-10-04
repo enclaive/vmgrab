@@ -112,8 +112,8 @@ func TestRoundtripV3MultiProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if out.Version != 3 {
-		t.Errorf("Version: got %d want 3", out.Version)
+	if out.Version != SchemaVersion {
+		t.Errorf("Version: got %d want %d", out.Version, SchemaVersion)
 	}
 	if len(out.Containers) != 2 {
 		t.Fatalf("Containers: got %d want 2", len(out.Containers))
