@@ -43,6 +43,33 @@ func (b *Backend) Available() bool {
 	return exec.Command("crictl", "info").Run() == nil
 }
 
+// Find inspects only the requested sandbox. Unrelated stale CRI entries must
+// not generate warnings or prevent a healthy target from being captured.
+func (b *Backend) Find(target string) (*backend.VM, error) {
+	pods, err := listPods()
+	if err != nil {
+		return nil, err
+	}
+	p, err := selectPod(pods, target)
+	if err != nil {
+		return nil, err
+	}
+	pi, err := inspectPod(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	kind, pid, err := b.classify(*p, pi, inventory(b.procRoot))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", target, err)
+	}
+	vm := &backend.VM{Name: p.Metadata.Name, Namespace: p.Metadata.Namespace,
+		PID: pid, Kind: kind, State: "running", Backend: b.Name()}
+	if kind == "pod-kata" {
+		vm.Security = b.procmem.DetectSecurity(pid)
+	}
+	return vm, nil
+}
+
 func (b *Backend) List() ([]backend.VM, error) {
 	pods, err := listPods()
 	if err != nil {

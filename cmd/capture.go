@@ -9,6 +9,19 @@ import (
 	"github.com/enclaive/vmgrab/pkg/dumpmeta"
 )
 
+func memoryProtection(kind, security string) string {
+	if security != "" {
+		return security + " configured"
+	}
+	if kind == "pod-runc" {
+		return "Host kernel (no SEV/TDX VM)"
+	}
+	if kind == "pod-unknown" {
+		return "Unknown (target unresolved)"
+	}
+	return "Not detected in VM configuration"
+}
+
 func targetBackend(target string, verbose bool) (backend.Backend, error) {
 	if backendName != "" {
 		b := backend.Get(backendName, verbose)

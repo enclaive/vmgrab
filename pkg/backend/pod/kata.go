@@ -95,6 +95,9 @@ func (b *Backend) classify(p podListItem, pi *podInspect, inv sandboxInventory) 
 	if pi.Info.PID > 0 {
 		exe, err := processExe(b.procRoot, pi.Info.PID)
 		if err != nil {
+			if os.IsNotExist(err) {
+				return "", 0, fmt.Errorf("sandbox PID %d is no longer running (stale CRI entry); target unresolved", pi.Info.PID)
+			}
 			return "", 0, fmt.Errorf("inspect sandbox pid %d: %w", pi.Info.PID, err)
 		}
 		if isQEMUExecutable(exe) {

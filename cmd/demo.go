@@ -166,6 +166,8 @@ func printComparison(phases [2]demoPhase) {
 			if a.Meta != nil {
 				if a.Meta.Security != "" {
 					security = a.Meta.Security
+				} else if a.Meta.Kind == "pod-runc" {
+					security = "none (host-kernel container)"
 				}
 				if a.Meta.Capture != nil {
 					coverage = fmt.Sprintf("selected mappings complete=%v", a.Meta.Capture.Complete)

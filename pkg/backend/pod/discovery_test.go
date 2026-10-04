@@ -128,3 +128,33 @@ func TestAmbiguousPod(t *testing.T) {
 		t.Fatalf("p=%v err=%v", p, err)
 	}
 }
+
+func TestFindInspectsOnlyRequestedSandbox(t *testing.T) {
+	root := t.TempDir()
+	fakeProcess(t, root, 42, "/opt/vendor/qemu-system-x86_64", "")
+	fakeCRI(t, 42, 42, "arbitrary-runtime")
+	cri := filepath.Join(strings.Split(os.Getenv("PATH"), ":")[0], "crictl")
+	data, err := os.ReadFile(cri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(root, "cri-calls")
+	script := strings.Replace(string(data), "#!/bin/sh\n", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '"+log+"'\n", 1)
+	script = strings.Replace(script, `"items":[`, `"items":[{"id":"stale","metadata":{"name":"broken","namespace":"other"},"state":"SANDBOX_READY"},`, 1)
+	if err := os.WriteFile(cri, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	b := New(false)
+	b.procRoot = root
+	vm, err := b.Find("ns/app")
+	if err != nil || vm == nil || vm.PID != 42 || vm.Kind != "pod-kata" {
+		t.Fatalf("vm=%+v err=%v", vm, err)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(calls), "stale") || !strings.Contains(string(calls), "inspectp sandbox") {
+		t.Fatalf("unexpected CRI calls: %s", calls)
+	}
+}

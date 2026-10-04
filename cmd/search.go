@@ -43,6 +43,8 @@ func printAnalysis(s *search.Searcher, a *search.Analysis, context int) {
 		fmt.Printf("Target: %s; backend=%s; kind=%s\n", a.Meta.Target, a.Meta.Backend, a.Meta.Kind)
 		if a.Meta.Security != "" {
 			fmt.Printf("Configured confidential computing: %s (recorded at capture time)\n", a.Meta.Security)
+		} else if a.Meta.Kind == "pod-runc" {
+			fmt.Printf("VM protection: %s\n", memoryProtection(a.Meta.Kind, ""))
 		}
 		if c := a.Meta.Capture; c != nil {
 			fmt.Printf("Capture scope: %s\n", c.Scope)
@@ -61,6 +63,7 @@ func printAnalysis(s *search.Searcher, a *search.Analysis, context int) {
 		fmt.Println("Additional matches exist; increase --max to display more.")
 	}
 	if len(a.Scan.Matches) > 0 {
+		fmt.Println("A regex match is not automatically a secret: it may be a function name, code or other public data.")
 		fmt.Println("The matched bytes are readable in this dump. Their presence alone does not establish whether guest-private memory was exposed.")
 	} else {
 		fmt.Println("The pattern was not found in the captured bytes. This does not establish encryption or absence from uncaptured memory.")
@@ -77,6 +80,7 @@ func printAnalysis(s *search.Searcher, a *search.Analysis, context int) {
 						end := match.Offset + int64(len(match.Data))
 						if match.Offset >= region.ByteStart && end <= region.ByteEnd {
 							fmt.Printf("  container=%s pid=%d address=0x%x\n", container.Name, process.PID, region.Start+uint64(match.Offset-region.ByteStart))
+							fmt.Printf("  mapping=%s %s\n", region.Perms, region.Path)
 						}
 					}
 				}
