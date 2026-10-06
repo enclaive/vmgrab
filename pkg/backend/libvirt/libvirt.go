@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/enclaive/vmgrab/pkg/backend"
+	"github.com/enclaive/vmgrab/pkg/dumpmeta"
 )
 
 func init() {
@@ -159,7 +160,24 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 	}
 
 	// Make dump file readable
-	exec.Command("sudo", "chmod", "644", outputPath).Run()
+	exec.Command("sudo", "-n", "chmod", "644", outputPath).Run()
+
+	// Record what was dumped, above all the detected confidential-computing
+	// status, so `search` can tell a protected guest from an unbooted one.
+	security := ""
+	pid := 0
+	if vms, lerr := b.List(); lerr == nil {
+		for i := range vms {
+			if vms[i].Name == vmName {
+				security = vms[i].Security
+				pid = vms[i].PID
+				break
+			}
+		}
+	}
+	if err := dumpmeta.WriteVM(outputPath, "libvirt", vmName, pid, security); err != nil && b.Verbose {
+		fmt.Printf("→ could not write %s sidecar: %v\n", dumpmeta.Suffix, err)
+	}
 
 	return outputPath, nil
 }
