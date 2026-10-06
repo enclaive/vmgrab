@@ -5,7 +5,9 @@
 *.so
 *.dylib
 
-# Build output (dist for multi-platform releases only)
+# Build output — never commit compiled binaries. A committed binary also
+# embeds the builder's local module paths.
+bin/
 dist/
 
 # Test binary, built with `go test -c`
@@ -48,3 +50,11 @@ enclaivessh
 # OS
 .DS_Store
 Thumbs.db
+
+# Local working notes and drafts, not part of the project
+MESSAGE-*.md
+NOTES-*.md
+
+# Local test plans and run logs: they record specific hosts and targets
+tests/PLAN.md
+tests/RESULTS.md
