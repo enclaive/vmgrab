@@ -44,6 +44,18 @@ evidence collection.
 
 ## Install
 
+Prebuilt static Linux binaries for `amd64`, `arm64`, `ppc64le` and `s390x` are
+attached to each [GitHub release](https://github.com/enclaive/vmgrab/releases):
+
+```bash
+ARCH=amd64   # or arm64, ppc64le, s390x
+curl -LO https://github.com/enclaive/vmgrab/releases/latest/download/vmgrab_linux_${ARCH}.tar.gz
+tar -xzf vmgrab_linux_${ARCH}.tar.gz
+sudo install vmgrab_linux_${ARCH}/vmgrab /usr/local/bin/
+```
+
+Each release also has a `checksums.txt` with SHA-256 sums. To build from source:
+
 ```bash
 make build           # builds bin/vmgrab with version info
 ./bin/vmgrab --version
