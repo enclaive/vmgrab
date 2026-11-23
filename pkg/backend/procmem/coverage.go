@@ -37,9 +37,16 @@ func DetectGuestMemfd(root string, pid int) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if target == "anon_inode:[kvm-gmem]" || strings.Contains(target, "kvm_guest_memfd") {
+		if isGuestMemfdLink(target) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// The descriptor's link name depends on the kernel: older kernels expose
+// guest_memfd as "anon_inode:[kvm-gmem]", newer ones back it with its own
+// filesystem and show "/[kvm-gmem] (deleted)".
+func isGuestMemfdLink(target string) bool {
+	return strings.Contains(target, "[kvm-gmem]") || strings.Contains(target, "kvm_guest_memfd")
 }
