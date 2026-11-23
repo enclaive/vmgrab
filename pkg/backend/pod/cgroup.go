@@ -1,12 +1,14 @@
 package pod
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 func cgroupPaths(data string) map[string]string {
@@ -61,7 +63,7 @@ func containerPIDs(root, id string, pid int) ([]int, error) {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(root, entry.Name(), "cgroup"))
-		if os.IsNotExist(err) {
+		if processGone(err) {
 			continue
 		}
 		if err != nil {
@@ -80,6 +82,11 @@ func containerPIDs(root, id string, pid int) ([]int, error) {
 		return nil, fmt.Errorf("no processes remain in container %s", id)
 	}
 	return result, nil
+}
+
+// A process that exits mid-scan yields ENOENT on open or ESRCH on read.
+func processGone(err error) bool {
+	return os.IsNotExist(err) || errors.Is(err, syscall.ESRCH)
 }
 
 func processStartTime(root string, pid int) (uint64, error) {

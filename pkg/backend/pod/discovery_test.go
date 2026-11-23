@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -156,5 +157,18 @@ func TestFindInspectsOnlyRequestedSandbox(t *testing.T) {
 	}
 	if strings.Contains(string(calls), "stale") || !strings.Contains(string(calls), "inspectp sandbox") {
 		t.Fatalf("unexpected CRI calls: %s", calls)
+	}
+}
+
+func TestProcessGone(t *testing.T) {
+	for _, err := range []error{os.ErrNotExist, &os.PathError{Op: "read", Path: "/proc/1/cgroup", Err: syscall.ESRCH}} {
+		if !processGone(err) {
+			t.Fatalf("%v must be treated as an exited process", err)
+		}
+	}
+	for _, err := range []error{nil, os.ErrPermission} {
+		if processGone(err) {
+			t.Fatalf("%v must not be skipped", err)
+		}
 	}
 }
