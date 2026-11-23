@@ -6,11 +6,30 @@ which application produced it. On a CRI node, use `--backend=pod` and a
 
 ```sh
 sudo vmgrab --backend=pod dump test/example -o /var/tmp
-vmgrab search /var/tmp/example.dump 'RECORD-[0-9a-f]{32}'
+sudo vmgrab search /var/tmp/example.dump 'RECORD-[0-9a-f]{32}'
 sudo vmgrab --backend=pod attack test/example --pattern='RECORD-[0-9a-f]{32}'
 ```
 
 Use the actual dump path printed by `dump`. Preserve its `.meta.json` sidecar.
+If the binary is not installed on PATH, use its full path. The search hint
+printed after capture includes that path and `sudo` for root-owned dumps.
+
+## Target discovery and protection labels
+
+Use `namespace/pod` to select one pod unambiguously. Targeted pod discovery
+inspects that sandbox without reporting errors for unrelated pods. Full `list`
+still reports unresolved sandboxes: for example, CRI may retain a Ready entry
+whose recorded process no longer exists. Such an entry remains unknown.
+
+The `VM MEMORY PROTECTION` column distinguishes:
+
+- `SEV-SNP configured` (or SEV/TDX): configuration detected for the VM process.
+- `Host kernel (no SEV/TDX VM)`: an ordinary process container, sharing the host kernel.
+- `Unknown (target unresolved)`: discovery could not identify the target.
+- `Not detected in VM configuration`: no supported CC configuration was detected.
+
+These labels describe the target's VM configuration, not every security
+property of the application or host.
 
 ## What is captured
 
@@ -48,6 +67,18 @@ on failure. Use `--cleanup=false` to retain them.
 A partial capture can still contain a confirmed match; the command reports the
 match and the incompleteness, and returns an error. Configured SEV/SNP/TDX is
 reported as capture-time configuration, not as an attestation result.
+
+A broad pattern such as `pass` or `password` also matches function names,
+diagnostic strings and public files. For example, `qmp_set_password` inside the
+QEMU executable is not the PostgreSQL password. When layout metadata is
+available, each match includes its container, PID, address, mapping permissions
+and backing path. A QEMU capture can contain its own executable, heap, libraries,
+guest boot files and shared buffers; none of these should automatically be
+described as guest-private application memory.
+
+Prefer a distinctive synthetic record pattern and confirm it is found in the
+ordinary target. Mapping attribution supplies context; it does not automatically
+classify an anonymous/shared buffer as safe or prove the origin of its contents.
 
 Search uses Go regular expressions. For sidecars with mapping layouts, it avoids
 joining unrelated virtual addresses and excludes synthetic padding. Without a
