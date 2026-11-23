@@ -38,12 +38,8 @@ type MemoryRegion struct {
 	Path  string // backing file/device, "" for anonymous mappings
 }
 
-// isDeviceBacked reports whether a mapping is backed by a device or kernel
-// pseudo-file rather than anonymous/guest RAM. The critical case is GPU
-// passthrough: qemu maps the card's BAR aperture from /dev/vfio (a 128 GiB
-// rw-s mapping), which is device MMIO, NOT guest RAM. Dumping it reads the
-// whole aperture over PCI and can fill the host disk. Guest RAM is anonymous
-// (or memfd/shmem), so we exclude /dev/* and /sys/* backings.
+// isDeviceBacked reports mappings backed by /dev or /sys, which are device
+// MMIO and not guest RAM. A passed-through GPU aperture can be over 100 GiB.
 func isDeviceBacked(path string) bool {
 	return strings.HasPrefix(path, "/dev/") || strings.HasPrefix(path, "/sys/")
 }
@@ -438,10 +434,8 @@ func humanBytes(n uint64) string {
 	}
 }
 
-// DumpMemoryRegion is the file-oriented wrapper around StreamMemoryRegion.
-// It creates outputPath (overwriting), streams one region into it, and chmods
-// the result to 0644. Use StreamMemoryRegion directly when you need to write
-// multiple regions into one file (e.g. full-pod dumps).
+// DumpMemoryRegion writes one region to a new file at outputPath. Use
+// StreamMemoryRegion to write several regions into one file.
 func (b *Backend) DumpMemoryRegion(pid int, region *MemoryRegion, outputPath string) error {
 	outFile, err := os.Create(outputPath)
 	if err != nil {

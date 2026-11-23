@@ -107,14 +107,8 @@ func listPods() ([]podListItem, error) {
 	return ready, nil
 }
 
-// allRunningContainers returns every CONTAINER_RUNNING container in the given
-// pod sandbox. The full-pod dump path uses this to walk every container
-// (main app + sidecars + ephemeral) so a memory-extraction attacker who
-// reaches the node sees the same surface area the attacker actually has —
-// not just whichever container `crictl ps` happened to list first.
-//
-// Returned order mirrors crictl's output (typically newest-first by creation
-// time) and is NOT stable. Callers that need determinism must sort by name.
+// allRunningContainers returns every running container of the sandbox,
+// sidecars included. The order follows crictl and is not stable.
 func allRunningContainers(podID string) ([]containerItem, error) {
 	out, err := runCrictl("ps", "--pod", podID, "-o", "json")
 	if err != nil {

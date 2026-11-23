@@ -17,10 +17,8 @@ type ScanResult struct {
 	FileSize int64
 }
 
-// Scan applies Go regexp semantics to the complete file, including binary data,
-// anchors and arbitrarily long matches. A read-only mapping avoids copying the
-// entire dump into Go's heap and avoids artificial chunk boundaries. Returned
-// match bytes are copied before the mapping is released.
+// Scan applies the regexp to the whole file through a read-only mapping, so
+// there are no chunk boundaries. Match bytes are copied before unmapping.
 func (s *Searcher) Scan(pattern string, maxMatches int) (ScanResult, error) {
 	return s.scanRanges(pattern, maxMatches, nil)
 }
