@@ -58,3 +58,28 @@ func TestStreamWriteError(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestDumpMemoryRegionKeepsPartialCapture(t *testing.T) {
+	fakeDD(t, "printf abc; exit 1\n")
+	path := filepath.Join(t.TempDir(), "vm.dump")
+	err := New(false).DumpMemoryRegion(123, &MemoryRegion{Start: 0, End: 8, Size: 8}, path)
+	var partial *PartialReadError
+	if !errors.As(err, &partial) || partial.Read != 3 {
+		t.Fatalf("err=%v", err)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(data, []byte("abc\x00\x00\x00\x00\x00")) {
+		t.Fatalf("partial capture was not kept padded: %q %v", data, readErr)
+	}
+}
+
+func TestDumpMemoryRegionRemovesEmptyCapture(t *testing.T) {
+	fakeDD(t, "exit 1\n")
+	path := filepath.Join(t.TempDir(), "vm.dump")
+	if err := New(false).DumpMemoryRegion(123, &MemoryRegion{Start: 0, End: 8, Size: 8}, path); err == nil {
+		t.Fatal("a failed read must be an error")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("a file with no captured bytes was left behind: %v", err)
+	}
+}

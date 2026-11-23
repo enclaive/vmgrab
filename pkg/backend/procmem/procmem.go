@@ -3,6 +3,7 @@ package procmem
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -243,16 +244,25 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 	outputPath := filepath.Join(outputDir, fmt.Sprintf("%s-%s.dump", vmName, timestamp))
 
 	// Dump memory via /proc/pid/mem
-	err = b.DumpMemoryRegion(vm.PID, guestRAM, outputPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to dump memory: %w", err)
+	dumpErr := b.DumpMemoryRegion(vm.PID, guestRAM, outputPath)
+	var partial *PartialReadError
+	if dumpErr != nil && (!errors.As(dumpErr, &partial) || partial.Read == 0) {
+		return "", fmt.Errorf("failed to dump memory: %w", dumpErr)
 	}
 
-	// Record what was dumped, above all the detected confidential-computing
-	// status: a raw guest-RAM dump of a protected guest is indistinguishable
-	// by content from one of an unbooted unprotected guest.
-	if err := dumpmeta.WriteVM(outputPath, "procmem", vm.Name, vm.PID, vm.Security); err != nil && b.Verbose {
-		fmt.Printf("→ could not write %s sidecar: %v\n", dumpmeta.Suffix, err)
+	// The sidecar records the detected confidential-computing status and,
+	// for a short read, how much of the file is padding.
+	var metaErr error
+	if partial != nil {
+		metaErr = dumpmeta.WriteVMPartial(outputPath, "procmem", vm.Name, vm.PID, vm.Security, partial.Read, partial)
+	} else {
+		metaErr = dumpmeta.WriteVM(outputPath, "procmem", vm.Name, vm.PID, vm.Security)
+	}
+	if metaErr != nil && b.Verbose {
+		fmt.Printf("→ could not write %s sidecar: %v\n", dumpmeta.Suffix, metaErr)
+	}
+	if partial != nil {
+		return outputPath, fmt.Errorf("incomplete capture saved to %s: %w", outputPath, dumpErr)
 	}
 
 	return outputPath, nil
@@ -434,23 +444,25 @@ func humanBytes(n uint64) string {
 	}
 }
 
-// DumpMemoryRegion writes one region to a new file at outputPath. Use
-// StreamMemoryRegion to write several regions into one file.
+// DumpMemoryRegion writes one region to a new file at outputPath. A short
+// read keeps the zero-padded file and still returns PartialReadError.
 func (b *Backend) DumpMemoryRegion(pid int, region *MemoryRegion, outputPath string) error {
 	outFile, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	if _, err := b.StreamMemoryRegion(pid, region, outFile); err != nil {
+	_, streamErr := b.StreamMemoryRegion(pid, region, outFile)
+	var partial *PartialReadError
+	if streamErr != nil && (!errors.As(streamErr, &partial) || partial.Read == 0) {
 		outFile.Close()
 		_ = os.Remove(outputPath)
-		return err
+		return streamErr
 	}
 	if err := outFile.Close(); err != nil {
 		return fmt.Errorf("close output: %w", err)
 	}
 	os.Chmod(outputPath, 0644)
-	return nil
+	return streamErr
 }
 
 // GetFileSize returns the size of a file

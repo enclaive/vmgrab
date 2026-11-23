@@ -158,6 +158,21 @@ func Remove(dumpPath string) error {
 // guest-kernel structures in it. Errors are returned but are not fatal to the
 // caller: the dump itself is still valid without a sidecar.
 func WriteVM(dumpPath, backendName, target string, pid int, security string) error {
+	return vmMeta(dumpPath, backendName, target, pid, security).Write(dumpPath)
+}
+
+// WriteVMPartial records a VM dump in which only read bytes were captured
+// and the rest of the file is zero padding.
+func WriteVMPartial(dumpPath, backendName, target string, pid int, security string, read int64, cause error) error {
+	m := vmMeta(dumpPath, backendName, target, pid, security)
+	m.Capture.Complete = false
+	m.Capture.BytesRead = read
+	m.Capture.BytesPadded = m.Size - read
+	m.Capture.Errors = []string{cause.Error()}
+	return m.Write(dumpPath)
+}
+
+func vmMeta(dumpPath, backendName, target string, pid int, security string) *Meta {
 	size := int64(0)
 	if fi, err := os.Stat(dumpPath); err == nil {
 		size = fi.Size()
@@ -166,7 +181,7 @@ func WriteVM(dumpPath, backendName, target string, pid int, security string) err
 	if backendName == "procmem" {
 		scope = "largest readable-writable non-device QEMU mapping (heuristic selection)"
 	}
-	m := &Meta{
+	return &Meta{
 		Capture:   &Capture{Scope: scope, Complete: size > 0, BytesRead: size},
 		Backend:   backendName,
 		Target:    target,
@@ -175,5 +190,4 @@ func WriteVM(dumpPath, backendName, target string, pid int, security string) err
 		Size:      size,
 		CreatedAt: time.Now().UTC(),
 	}
-	return m.Write(dumpPath)
 }
