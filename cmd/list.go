@@ -24,7 +24,17 @@ func runList(cmd *cobra.Command, args []string) error {
 	verbose, _ := cmd.Flags().GetBool("verbose")
 
 	// Get VMs from all available backends
-	vms, err := backend.ListAll(verbose)
+	var vms []backend.VM
+	var err error
+	if backendName != "" {
+		b := GetBackend(verbose)
+		if b == nil {
+			return fmt.Errorf("backend unavailable: %s", backendName)
+		}
+		vms, err = b.List()
+	} else {
+		vms, err = backend.ListAll(verbose)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to list VMs: %w", err)
 	}
@@ -91,9 +101,9 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	// Print table header
 	if hasPods {
-		fmt.Printf("%-8s %-*s %-12s %-*s %s\n", "PID", nameWidth, "NAME", "STATE", kindWidth, "KIND", "SECURITY")
+		fmt.Printf("%-8s %-*s %-12s %-*s %s\n", "PID", nameWidth, "NAME", "STATE", kindWidth, "KIND", "VM MEMORY PROTECTION")
 	} else {
-		fmt.Printf("%-8s %-*s %-12s %s\n", "PID", nameWidth, "NAME", "STATE", "SECURITY")
+		fmt.Printf("%-8s %-*s %-12s %s\n", "PID", nameWidth, "NAME", "STATE", "VM MEMORY PROTECTION")
 	}
 	fmt.Println(color.HiBlackString(repeatStr("━", totalWidth)))
 
@@ -116,9 +126,9 @@ func runList(cmd *cobra.Command, args []string) error {
 		// Format security
 		var securityLabel string
 		if vm.Security != "" {
-			securityLabel = color.GreenString("🔒 " + vm.Security)
+			securityLabel = color.GreenString("🔒 " + memoryProtection(vm.Kind, vm.Security))
 		} else {
-			securityLabel = color.RedString("⚠️  Unprotected")
+			securityLabel = memoryProtection(vm.Kind, vm.Security)
 		}
 
 		if hasPods {

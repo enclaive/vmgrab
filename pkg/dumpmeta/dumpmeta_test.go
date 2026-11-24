@@ -1,6 +1,7 @@
 package dumpmeta
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -112,8 +113,8 @@ func TestRoundtripV3MultiProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if out.Version != 3 {
-		t.Errorf("Version: got %d want 3", out.Version)
+	if out.Version != SchemaVersion {
+		t.Errorf("Version: got %d want %d", out.Version, SchemaVersion)
 	}
 	if len(out.Containers) != 2 {
 		t.Fatalf("Containers: got %d want 2", len(out.Containers))
@@ -147,5 +148,23 @@ func TestRemove(t *testing.T) {
 	}
 	if err := Remove(dumpPath); err != nil {
 		t.Errorf("Remove on absent file should be nil, got %v", err)
+	}
+}
+
+func TestWriteVMPartialRecordsPadding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vm.dump")
+	if err := os.WriteFile(path, make([]byte, 8), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteVMPartial(path, "procmem", "cvm-guest", 4242, "SEV-SNP", 3, errors.New("read 3 of 8 bytes")); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Read(path)
+	if err != nil || m == nil || m.Capture == nil {
+		t.Fatalf("meta=%+v err=%v", m, err)
+	}
+	c := m.Capture
+	if c.Complete || c.BytesRead != 3 || c.BytesPadded != 5 || len(c.Errors) != 1 || m.Size != 8 {
+		t.Fatalf("capture=%+v size=%d", c, m.Size)
 	}
 }

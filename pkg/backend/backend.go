@@ -1,10 +1,37 @@
 package backend
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 )
+
+// Lookup resolves a single target without requiring a full inventory when the
+// backend supports targeted discovery.
+func Lookup(b Backend, name string) (*VM, error) {
+	if finder, ok := b.(interface{ Find(string) (*VM, error) }); ok {
+		return finder.Find(name)
+	}
+	vms, err := b.List()
+	if err != nil {
+		return nil, err
+	}
+	var found *VM
+	for i := range vms {
+		vm := &vms[i]
+		if vm.Name != name && (vm.Namespace == "" || vm.Namespace+"/"+vm.Name != name) {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("ambiguous target %q; use namespace/name", name)
+		}
+		found = vm
+	}
+	if found == nil {
+		return nil, fmt.Errorf("target not found: %s", name)
+	}
+	return found, nil
+}
 
 // VM represents a virtual machine or pod target.
 // The zero values for Kind and Namespace preserve legacy VM behavior.
@@ -108,7 +135,11 @@ func ListAll(verbose bool) ([]VM, error) {
 
 		for _, vm := range vms {
 			if vm.PID == 0 {
-				continue // skip VMs without PID
+				if vm.Kind == "pod-unknown" {
+					vm.Backend = name
+					allVMs = append(allVMs, vm)
+				}
+				continue
 			}
 			if !seen[vm.PID] {
 				seen[vm.PID] = true
@@ -145,32 +176,18 @@ func PodBackendBlockedByPerms() bool {
 // pod targets (vm.Namespace+"/"+vm.Name); otherwise it matches vm.Name.
 func FindVM(name string, verbose bool) (Backend, *VM) {
 	backendOrder := []string{"pod", "procmem", "libvirt", "qemu"}
-	nsName := strings.Contains(name, "/")
-
 	for _, bName := range backendOrder {
 		b := Get(bName, verbose)
 		if b == nil || !b.Available() {
 			continue
 		}
 
-		vms, err := b.List()
+		vm, err := Lookup(b, name)
 		if err != nil {
 			continue
 		}
-
-		for i := range vms {
-			var match bool
-			if nsName {
-				match = vms[i].Namespace != "" &&
-					vms[i].Namespace+"/"+vms[i].Name == name
-			} else {
-				match = vms[i].Name == name
-			}
-			if match {
-				vms[i].Backend = bName
-				return b, &vms[i]
-			}
-		}
+		vm.Backend = bName
+		return b, vm
 	}
 	return nil, nil
 }

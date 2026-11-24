@@ -46,22 +46,22 @@ type containerInspect struct {
 // Where to find RuntimeHandler:
 //   - status.runtimeHandler        — containerd (standard CRI field)
 //   - info.runtimeSpec.annotations["io.kubernetes.cri-o.RuntimeHandler"]
-//                                   — CRI-O (OpenShift). The top-level
-//                                   `runtimeHandler` from `crictl pods` is
-//                                   empty on live OCP even for Kata pods.
+//     — CRI-O (OpenShift). The top-level
+//     `runtimeHandler` from `crictl pods` is
+//     empty on live OCP even for Kata pods.
 //
 // Where to find the Kata sandbox PID / id:
 //   - info.pid                     — usually the Kata shim on containerd, but
-//                                   on OpenShift CRI-O + Enclaive Kata this
-//                                   is already the QEMU host PID (verified on
-//                                   RHCOS 9.6 + kata-enclaive 2026-04). We
-//                                   still verify by inspecting cmdline before
-//                                   trusting it.
+//     on OpenShift CRI-O + Enclaive Kata this
+//     is already the QEMU host PID (verified on
+//     RHCOS 9.6 + kata-enclaive 2026-04). We
+//     still verify by inspecting cmdline before
+//     trusting it.
 //   - info.runtimeSpec.annotations["io.katacontainers.pkg.oci.sandbox_id"]
-//                                   — set by upstream Kata; Enclaive variant
-//                                   does NOT set it. Use CRI pod ID as a
-//                                   fallback match string (QEMU cmdline
-//                                   always contains `-name sandbox-<podID>`).
+//     — set by upstream Kata; Enclaive variant
+//     does NOT set it. Use CRI pod ID as a
+//     fallback match string (QEMU cmdline
+//     always contains `-name sandbox-<podID>`).
 type podInspect struct {
 	Status struct {
 		RuntimeHandler string `json:"runtimeHandler"`
@@ -107,29 +107,24 @@ func listPods() ([]podListItem, error) {
 	return ready, nil
 }
 
-// firstRunningContainer returns the first CONTAINER_RUNNING container in the
-// given pod sandbox, plus a count of running containers (for a verbose warning
-// when > 1).
-func firstRunningContainer(podID string) (*containerItem, int, error) {
+// allRunningContainers returns every running container of the sandbox,
+// sidecars included. The order follows crictl and is not stable.
+func allRunningContainers(podID string) ([]containerItem, error) {
 	out, err := runCrictl("ps", "--pod", podID, "-o", "json")
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	var cl containerList
 	if err := json.Unmarshal(out, &cl); err != nil {
-		return nil, 0, fmt.Errorf("parse crictl ps: %w", err)
+		return nil, fmt.Errorf("parse crictl ps: %w", err)
 	}
-	running := 0
-	var first *containerItem
+	var running []containerItem
 	for i := range cl.Containers {
 		if cl.Containers[i].State == "CONTAINER_RUNNING" {
-			running++
-			if first == nil {
-				first = &cl.Containers[i]
-			}
+			running = append(running, cl.Containers[i])
 		}
 	}
-	return first, running, nil
+	return running, nil
 }
 
 // containerPID returns the host PID of the given container's main process.

@@ -2,6 +2,8 @@ package procmem
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +36,13 @@ type MemoryRegion struct {
 	End   uint64
 	Perms string
 	Size  uint64
+	Path  string // backing file/device, "" for anonymous mappings
+}
+
+// isDeviceBacked reports mappings backed by /dev or /sys, which are device
+// MMIO and not guest RAM. A passed-through GPU aperture can be over 100 GiB.
+func isDeviceBacked(path string) bool {
+	return strings.HasPrefix(path, "/dev/") || strings.HasPrefix(path, "/sys/")
 }
 
 // New creates a new procmem backend
@@ -208,14 +217,16 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 	// Find the largest rw- region (guest RAM)
 	// For standard VMs: rw-p (private)
 	// For SEV-SNP VMs: rw-s (shared memory for encrypted pages)
+	// Device-backed mappings (e.g. a passed-through GPU's /dev/vfio BAR) are
+	// excluded — they are MMIO, not guest RAM, and can be far larger than RAM.
 	var guestRAM *MemoryRegion
 	for i := range regions {
 		perms := regions[i].Perms
-		// Accept rw-p (private) or rw-s (shared) - both can be guest RAM
-		if strings.HasPrefix(perms, "rw-") {
-			if guestRAM == nil || regions[i].Size > guestRAM.Size {
-				guestRAM = &regions[i]
-			}
+		if !strings.HasPrefix(perms, "rw-") || isDeviceBacked(regions[i].Path) {
+			continue
+		}
+		if guestRAM == nil || regions[i].Size > guestRAM.Size {
+			guestRAM = &regions[i]
 		}
 	}
 
@@ -233,16 +244,25 @@ func (b *Backend) Dump(vmName string, outputDir string) (string, error) {
 	outputPath := filepath.Join(outputDir, fmt.Sprintf("%s-%s.dump", vmName, timestamp))
 
 	// Dump memory via /proc/pid/mem
-	err = b.DumpMemoryRegion(vm.PID, guestRAM, outputPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to dump memory: %w", err)
+	dumpErr := b.DumpMemoryRegion(vm.PID, guestRAM, outputPath)
+	var partial *PartialReadError
+	if dumpErr != nil && (!errors.As(dumpErr, &partial) || partial.Read == 0) {
+		return "", fmt.Errorf("failed to dump memory: %w", dumpErr)
 	}
 
-	// Record what was dumped, above all the detected confidential-computing
-	// status: a raw guest-RAM dump of a protected guest is indistinguishable
-	// by content from one of an unprotected guest whose kernel is not resident.
-	if err := dumpmeta.WriteVM(outputPath, "procmem", vm.Name, vm.PID, vm.Security); err != nil && b.Verbose {
-		fmt.Printf("→ could not write %s sidecar: %v\n", dumpmeta.Suffix, err)
+	// The sidecar records the detected confidential-computing status and,
+	// for a short read, how much of the file is padding.
+	var metaErr error
+	if partial != nil {
+		metaErr = dumpmeta.WriteVMPartial(outputPath, "procmem", vm.Name, vm.PID, vm.Security, partial.Read, partial)
+	} else {
+		metaErr = dumpmeta.WriteVM(outputPath, "procmem", vm.Name, vm.PID, vm.Security)
+	}
+	if metaErr != nil && b.Verbose {
+		fmt.Printf("→ could not write %s sidecar: %v\n", dumpmeta.Suffix, metaErr)
+	}
+	if partial != nil {
+		return outputPath, fmt.Errorf("incomplete capture saved to %s: %w", outputPath, dumpErr)
 	}
 
 	return outputPath, nil
@@ -266,7 +286,10 @@ func (b *Backend) ParseMemoryMaps(pid int) ([]MemoryRegion, error) {
 
 	var regions []MemoryRegion
 
-	// Parse lines like: 7f1234000000-7f1244000000 rw-p 00000000 00:00 0
+	// Parse lines like:
+	//   7f1234000000-7f1244000000 rw-p 00000000 00:00 0
+	//   78dc80000000-78fc80000000 rw-s 00000000 00:06 1234  /dev/vfio/devices/vfio2
+	// Fields: range, perms, offset, dev, inode, [path]
 	re := regexp.MustCompile(`^([0-9a-f]+)-([0-9a-f]+)\s+(\S+)`)
 
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
@@ -290,11 +313,18 @@ func (b *Backend) ParseMemoryMaps(pid int) ([]MemoryRegion, error) {
 		perms := matches[3]
 		size := end - start
 
+		// The backing path, if any, is the 6th whitespace field onward.
+		path := ""
+		if fields := strings.Fields(line); len(fields) >= 6 {
+			path = strings.Join(fields[5:], " ")
+		}
+
 		regions = append(regions, MemoryRegion{
 			Start: start,
 			End:   end,
 			Perms: perms,
 			Size:  size,
+			Path:  path,
 		})
 	}
 
@@ -318,72 +348,121 @@ func (b *Backend) ParseMemoryMaps(pid int) ([]MemoryRegion, error) {
 	return regions, nil
 }
 
-// DumpMemoryRegion reads memory from /proc/pid/mem and writes to file.
-// Exported for reuse by other backends (e.g. pod) that dump by PID.
-func (b *Backend) DumpMemoryRegion(pid int, region *MemoryRegion, outputPath string) error {
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
+// PartialReadError records unread bytes even when padding preserves the layout.
+type PartialReadError struct {
+	Read, Expected int64
+	Cause          error
+}
 
-	// Open output file
+func (e *PartialReadError) Error() string {
+	return fmt.Sprintf("read %d of %d bytes; remainder padded: %v", e.Read, e.Expected, e.Cause)
+}
+func (e *PartialReadError) Unwrap() error { return e.Cause }
+
+// StreamMemoryRegion copies a selected mapping. Short reads are padded to
+// preserve offsets but ALWAYS return PartialReadError. Output errors are fatal.
+func (b *Backend) StreamMemoryRegion(pid int, region *MemoryRegion, w io.Writer) (int64, error) {
+	if region == nil || region.End < region.Start || region.Size != region.End-region.Start || region.Size > uint64(^uint64(0)>>1) {
+		return 0, fmt.Errorf("invalid memory region")
+	}
+	expected := int64(region.Size)
+	args := []string{fmt.Sprintf("if=/proc/%d/mem", pid), "bs=4M", fmt.Sprintf("skip=%d", region.Start), fmt.Sprintf("count=%d", region.Size), "iflag=skip_bytes,count_bytes,fullblock", "status=none"}
+	cmd := exec.Command("dd", args...)
+	if os.Geteuid() != 0 {
+		cmd = exec.Command("sudo", append([]string{"dd"}, args...)...)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return 0, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err = cmd.Start(); err != nil {
+		return 0, fmt.Errorf("start memory read: %w", err)
+	}
+	n, copyErr := io.Copy(w, stdout)
+	if copyErr != nil {
+		_ = stdout.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return n, fmt.Errorf("write memory dump: %w", copyErr)
+	}
+	waitErr := cmd.Wait()
+	read := n
+	if n < expected {
+		padded, padErr := writeZeros(w, expected-n)
+		n += padded
+		if padErr != nil {
+			return n, fmt.Errorf("pad memory dump: %w", padErr)
+		}
+	}
+	if waitErr != nil || read != expected {
+		cause := waitErr
+		if cause == nil {
+			cause = io.ErrUnexpectedEOF
+		}
+		return n, &PartialReadError{Read: read, Expected: expected, Cause: fmt.Errorf("%w: %s", cause, strings.TrimSpace(stderr.String()))}
+	}
+	return n, nil
+}
+
+// writeZeros writes exactly n zero bytes to w in 4 MiB chunks.
+func writeZeros(w io.Writer, n int64) (int64, error) {
+	const chunk = 4 * 1024 * 1024
+	buf := make([]byte, chunk)
+	var total int64
+	for total < n {
+		want := n - total
+		if want > chunk {
+			want = chunk
+		}
+		written, err := w.Write(buf[:want])
+		total += int64(written)
+		if err != nil {
+			return total, err
+		}
+		if int64(written) != want {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
+}
+
+// humanBytes formats a byte count for verbose-mode log lines.
+func humanBytes(n uint64) string {
+	const unit = 1024.0
+	f := float64(n)
+	switch {
+	case f >= unit*unit*unit:
+		return fmt.Sprintf("%.2f GB", f/(unit*unit*unit))
+	case f >= unit*unit:
+		return fmt.Sprintf("%.2f MB", f/(unit*unit))
+	case f >= unit:
+		return fmt.Sprintf("%.2f KB", f/unit)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// DumpMemoryRegion writes one region to a new file at outputPath. A short
+// read keeps the zero-padded file and still returns PartialReadError.
+func (b *Backend) DumpMemoryRegion(pid int, region *MemoryRegion, outputPath string) error {
 	outFile, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer outFile.Close()
-
-	// Open /proc/pid/mem with sudo dd (more reliable for large reads)
-	// Using dd with skip and count for chunked reading
-	chunkSize := uint64(64 * 1024 * 1024) // 64MB chunks
-	totalSize := region.Size
-	offset := region.Start
-
-	if b.Verbose {
-		fmt.Printf("→ Dumping %.2f GB in %d chunks...\n",
-			float64(totalSize)/(1024*1024*1024),
-			(totalSize+chunkSize-1)/chunkSize)
+	_, streamErr := b.StreamMemoryRegion(pid, region, outFile)
+	var partial *PartialReadError
+	if streamErr != nil && (!errors.As(streamErr, &partial) || partial.Read == 0) {
+		outFile.Close()
+		_ = os.Remove(outputPath)
+		return streamErr
 	}
-
-	// Use sudo dd for reading /proc/pid/mem
-	for offset < region.End {
-		remaining := region.End - offset
-		readSize := chunkSize
-		if remaining < readSize {
-			readSize = remaining
-		}
-
-		// dd if=/proc/PID/mem bs=1M count=64 skip=OFFSET iflag=skip_bytes
-		cmd := exec.Command("sudo", "dd",
-			fmt.Sprintf("if=%s", memPath),
-			fmt.Sprintf("bs=%d", readSize),
-			"count=1",
-			fmt.Sprintf("skip=%d", offset),
-			"iflag=skip_bytes",
-			"status=none",
-		)
-
-		data, err := cmd.Output()
-		if err != nil {
-			// For SEV-SNP VMs, reading encrypted memory may fail or return zeros
-			// This is expected behavior - write zeros and continue
-			if b.Verbose {
-				fmt.Printf("→ Read error at offset 0x%x (may be encrypted): %v\n", offset, err)
-			}
-			// Write zeros for this chunk
-			zeros := make([]byte, readSize)
-			outFile.Write(zeros)
-		} else {
-			_, err = outFile.Write(data)
-			if err != nil {
-				return fmt.Errorf("failed to write to output file: %w", err)
-			}
-		}
-
-		offset += readSize
+	if err := outFile.Close(); err != nil {
+		return fmt.Errorf("close output: %w", err)
 	}
-
-	// Make file readable
 	os.Chmod(outputPath, 0644)
-
-	return nil
+	return streamErr
 }
 
 // GetFileSize returns the size of a file
@@ -434,7 +513,7 @@ func (b *Backend) DumpLive(vmName string, handler func(data []byte, offset uint6
 
 	var guestRAM *MemoryRegion
 	for i := range regions {
-		if regions[i].Perms == "rw-p" {
+		if regions[i].Perms == "rw-p" && !isDeviceBacked(regions[i].Path) {
 			if guestRAM == nil || regions[i].Size > guestRAM.Size {
 				guestRAM = &regions[i]
 			}

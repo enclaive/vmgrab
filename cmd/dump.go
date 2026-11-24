@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -35,43 +36,13 @@ func runDump(cmd *cobra.Command, args []string) error {
 	vmName := args[0]
 	verbose, _ := cmd.Flags().GetBool("verbose")
 
-	// Use specific backend if specified, otherwise find VM across all backends
-	var b backend.Backend
-	var vm *backend.VM
-
-	if backendName != "" {
-		// Use explicitly specified backend
-		b = GetBackend(verbose)
-		if b == nil {
-			return fmt.Errorf("backend not available: %s", backendName)
-		}
-		// Find VM or pod in this specific backend. Accept either bare
-		// name or "namespace/name" form for pod targets.
-		vms, err := b.List()
-		if err != nil {
-			return fmt.Errorf("failed to list targets: %w", err)
-		}
-		nsName := strings.Contains(vmName, "/")
-		for i := range vms {
-			match := vms[i].Name == vmName
-			if nsName {
-				match = vms[i].Namespace != "" &&
-					vms[i].Namespace+"/"+vms[i].Name == vmName
-			}
-			if match {
-				vm = &vms[i]
-				break
-			}
-		}
-		if vm == nil {
-			return fmt.Errorf("target not found in %s backend: %s", backendName, vmName)
-		}
-	} else {
-		// Auto-detect: find target across all backends
-		b, vm = backend.FindVM(vmName, verbose)
-		if b == nil || vm == nil {
-			return fmt.Errorf("target not found: %s", vmName)
-		}
+	b, err := targetBackend(vmName, verbose)
+	if err != nil {
+		return err
+	}
+	vm, err := backend.Lookup(b, vmName)
+	if err != nil {
+		return err
 	}
 
 	// Print header
@@ -91,9 +62,9 @@ func runDump(cmd *cobra.Command, args []string) error {
 
 	// Show SEV status
 	if vm.Security != "" {
-		fmt.Printf("🔒 Security:       %s\n", color.GreenString("%s Protected", vm.Security))
+		fmt.Printf("🔒 VM protection:  %s\n", color.GreenString(memoryProtection(vm.Kind, vm.Security)))
 	} else {
-		fmt.Printf("⚠️  Security:       %s\n", color.RedString("No encryption"))
+		fmt.Printf("   VM protection:  %s\n", memoryProtection(vm.Kind, vm.Security))
 	}
 
 	fmt.Printf("🔧 Backend:        %s\n", color.HiBlackString(b.Name()))
@@ -136,7 +107,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 	bar.Finish()
 
 	if err != nil {
-		return fmt.Errorf("failed to dump VM memory: %w", err)
+		return fmt.Errorf("capture failed (artifact: %s): %w", outputFile, err)
 	}
 
 	duration := time.Since(startTime)
@@ -161,10 +132,18 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// Show next steps
 	fmt.Println()
 	color.Cyan("📝 Next steps:")
-	fmt.Printf("   Search dump:  %s\n", color.HiWhiteString("vmgrab search %s <pattern>", outputFile))
+	executable, err := os.Executable()
+	if err != nil {
+		executable = os.Args[0]
+	}
+	fmt.Printf("   Search dump:  %s\n", color.HiWhiteString("sudo %s search %s 'YOUR_PATTERN'", shellQuote(executable), shellQuote(outputFile)))
 	fmt.Println()
 
 	return nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 // formatBytes formats bytes as human-readable string
